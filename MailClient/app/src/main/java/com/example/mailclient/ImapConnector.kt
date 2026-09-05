@@ -4,6 +4,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.util.Properties
 import javax.mail.FetchProfile
+import javax.mail.Flags
 import javax.mail.Folder
 import javax.mail.Multipart
 import javax.mail.Part
@@ -33,6 +34,24 @@ object ImapConnector {
         val messages: List<MailHeader>,
         val totalCount: Int
     )
+
+    val spamFolderNames = listOf(
+        "spam", "junk", "junk e-mail", "bulk mail", "bulk",
+        "спам", "[gmail]/spam"
+    )
+
+    val trashFolderNames = listOf(
+        "trash", "deleted", "deleted items", "deleted messages", "bin",
+        "корзина", "удалённые", "удаленные", "[gmail]/trash"
+    )
+
+    fun isSpamFolder(folderName: String): Boolean {
+        return spamFolderNames.any { candidate -> folderName.equals(candidate, ignoreCase = true) }
+    }
+
+    fun isTrashFolder(folderName: String): Boolean {
+        return trashFolderNames.any { candidate -> folderName.equals(candidate, ignoreCase = true) }
+    }
 
     private fun openStore(host: String, port: Int, email: String, password: String): Store {
         val props = Properties().apply {
@@ -122,6 +141,154 @@ object ImapConnector {
         } finally {
             try { folder?.close(false) } catch (_: Exception) {}
             try { store?.close() } catch (_: Exception) {}
+        }
+    }
+
+    suspend fun listFolders(
+        host: String,
+        port: Int,
+        email: String,
+        password: String
+    ): Result<List<String>> = withContext(Dispatchers.IO) {
+        var store: Store? = null
+        try {
+            store = openStore(host, port, email, password)
+            val defaultFolder = store.defaultFolder
+            val all = defaultFolder.list("*")
+            val selectable = all.filter { (it.type and Folder.HOLDS_MESSAGES) != 0 }
+            val names = selectable.map { it.fullName }
+            val sorted = names.sortedWith(
+                compareBy(
+                    { if (it.equals("INBOX", ignoreCase = true)) 0 else 1 },
+                    { it }
+                )
+            )
+            Result.success(sorted)
+        } catch (e: Exception) {
+            Result.failure(e)
+        } finally {
+            try { store?.close() } catch (_: Exception) {}
+        }
+    }
+
+    suspend fun moveMessage(
+        host: String,
+        port: Int,
+        email: String,
+        password: String,
+        msgNum: Int,
+        fromFolder: String,
+        toFolder: String
+    ): Result<Unit> = withContext(Dispatchers.IO) {
+        var store: Store? = null
+        var folder: Folder? = null
+        try {
+            store = openStore(host, port, email, password)
+            folder = store.getFolder(fromFolder)
+            folder.open(Folder.READ_WRITE)
+
+            val message = folder.getMessage(msgNum)
+            val destFolder = store.getFolder(toFolder)
+            folder.copyMessages(arrayOf(message), destFolder)
+            message.setFlag(Flags.Flag.DELETED, true)
+
+            Result.success(Unit)
+        } catch (e: Exception) {
+            Result.failure(e)
+        } finally {
+            try { folder?.close(true) } catch (_: Exception) {}
+            try { store?.close() } catch (_: Exception) {}
+        }
+    }
+
+    suspend fun deleteMessage(
+        host: String,
+        port: Int,
+        email: String,
+        password: String,
+        msgNum: Int,
+        folderName: String
+    ): Result<Unit> = withContext(Dispatchers.IO) {
+        var store: Store? = null
+        var folder: Folder? = null
+        try {
+            store = openStore(host, port, email, password)
+            folder = store.getFolder(folderName)
+            folder.open(Folder.READ_WRITE)
+
+            val message = folder.getMessage(msgNum)
+            message.setFlag(Flags.Flag.DELETED, true)
+
+            Result.success(Unit)
+        } catch (e: Exception) {
+            Result.failure(e)
+        } finally {
+            try { folder?.close(true) } catch (_: Exception) {}
+            try { store?.close() } catch (_: Exception) {}
+        }
+    }
+
+    suspend fun moveToSpam(
+        host: String,
+        port: Int,
+        email: String,
+        password: String,
+        msgNum: Int,
+        fromFolder: String
+    ): Result<Unit> = withContext(Dispatchers.IO) {
+        val foldersResult = listFolders(host, port, email, password)
+        val folders = foldersResult.getOrElse { return@withContext Result.failure(it) }
+
+        val spamFolder = folders.firstOrNull { name ->
+            spamFolderNames.any { candidate -> name.equals(candidate, ignoreCase = true) }
+        }
+
+        if (spamFolder == null) {
+            return@withContext Result.failure(Exception("Папка «Спам» не найдена в этом ящике"))
+        }
+
+        moveMessage(host, port, email, password, msgNum, fromFolder, spamFolder)
+    }
+
+    suspend fun moveToTrash(
+        host: String,
+        port: Int,
+        email: String,
+        password: String,
+        msgNum: Int,
+        fromFolder: String
+    ): Result<Unit> = withContext(Dispatchers.IO) {
+        val foldersResult = listFolders(host, port, email, password)
+        val folders = foldersResult.getOrElse { return@withContext Result.failure(it) }
+
+        val trashFolder = folders.firstOrNull { name ->
+            trashFolderNames.any { candidate -> name.equals(candidate, ignoreCase = true) }
+        }
+
+        if (trashFolder == null) {
+            return@withContext Result.failure(Exception("Папка «Корзина» не найдена в этом ящике"))
+        }
+
+        moveMessage(host, port, email, password, msgNum, fromFolder, trashFolder)
+    }
+
+    suspend fun restoreFromTrash(
+        host: String,
+        port: Int,
+        email: String,
+        password: String,
+        msgNum: Int,
+        fromFolder: String
+    ): Result<Unit> = withContext(Dispatchers.IO) {
+        moveMessage(host, port, email, password, msgNum, fromFolder, "INBOX")
+    }
+
+    fun displayNameFor(folderName: String): String {
+        return when {
+            folderName.equals("INBOX", ignoreCase = true) -> "Входящие"
+            isTrashFolder(folderName) -> "Корзина"
+            isSpamFolder(folderName) -> "Спам"
+            else -> folderName
         }
     }
 

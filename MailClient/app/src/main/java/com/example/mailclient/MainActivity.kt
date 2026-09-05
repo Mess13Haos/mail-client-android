@@ -38,6 +38,7 @@ sealed class Screen {
     object Login : Screen()
     object Mailbox : Screen()
     data class MessageView(val header: ImapConnector.MailHeader) : Screen()
+    object FolderList : Screen()
 }
 
 @Composable
@@ -47,22 +48,42 @@ fun AppRoot() {
     var port by remember { mutableStateOf(993) }
     var email by remember { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
+    var currentFolder by remember { mutableStateOf("INBOX") }
+    var mailboxReloadKey by remember { mutableStateOf(0) }
 
     when (val current = screen) {
         is Screen.Login -> LoginScreen(
             onLoginSuccess = { h, p, e, pass ->
                 host = h; port = p; email = e; password = pass
+                currentFolder = "INBOX"
                 screen = Screen.Mailbox
             }
         )
         is Screen.Mailbox -> MailboxScreen(
             host = host, port = port, email = email, password = password,
+            folderName = currentFolder,
+            reloadKey = mailboxReloadKey,
             onLogout = { screen = Screen.Login },
-            onOpenMessage = { header -> screen = Screen.MessageView(header) }
+            onOpenMessage = { header -> screen = Screen.MessageView(header) },
+            onOpenFolders = { screen = Screen.FolderList }
         )
         is Screen.MessageView -> MessageScreen(
             host = host, port = port, email = email, password = password,
             header = current.header,
+            folderName = currentFolder,
+            onBack = { screen = Screen.Mailbox },
+            onActionDone = {
+                mailboxReloadKey++
+                screen = Screen.Mailbox
+            }
+        )
+        is Screen.FolderList -> FolderListScreen(
+            host = host, port = port, email = email, password = password,
+            onSelectFolder = { folder ->
+                currentFolder = folder
+                mailboxReloadKey++
+                screen = Screen.Mailbox
+            },
             onBack = { screen = Screen.Mailbox }
         )
     }
@@ -174,8 +195,11 @@ fun MailboxScreen(
     port: Int,
     email: String,
     password: String,
+    folderName: String,
+    reloadKey: Int,
     onLogout: () -> Unit,
-    onOpenMessage: (ImapConnector.MailHeader) -> Unit
+    onOpenMessage: (ImapConnector.MailHeader) -> Unit,
+    onOpenFolders: () -> Unit
 ) {
     var offset by remember { mutableStateOf(0) }
     var totalCount by remember { mutableStateOf(0) }
@@ -191,7 +215,7 @@ fun MailboxScreen(
         scope.launch {
             val result = ImapConnector.fetchMessages(
                 host = host, port = port, email = email, password = password,
-                offset = newOffset, limit = pageSize
+                offset = newOffset, limit = pageSize, folderName = folderName
             )
             isLoading = false
             result.fold(
@@ -205,16 +229,22 @@ fun MailboxScreen(
         }
     }
 
-    LaunchedEffect(Unit) {
+    LaunchedEffect(folderName, reloadKey) {
         loadPage(0)
     }
 
     Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
         Row(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            Text("Входящие", style = MaterialTheme.typography.titleLarge)
+            Column {
+                Text("Почта", style = MaterialTheme.typography.titleLarge)
+                TextButton(onClick = onOpenFolders, contentPadding = PaddingValues(0.dp)) {
+                    Text("Папка: ${ImapConnector.displayNameFor(folderName)} ▾")
+                }
+            }
             TextButton(onClick = onLogout) { Text("Выйти") }
         }
 
@@ -273,6 +303,8 @@ fun MailboxScreen(
     }
 }
 
+private enum class PendingAction { NONE, DELETE, SPAM, MOVE, RESTORE }
+
 @Composable
 fun MessageScreen(
     host: String,
@@ -280,22 +312,70 @@ fun MessageScreen(
     email: String,
     password: String,
     header: ImapConnector.MailHeader,
-    onBack: () -> Unit
+    folderName: String,
+    onBack: () -> Unit,
+    onActionDone: () -> Unit
 ) {
     var body by remember { mutableStateOf("") }
     var isLoading by remember { mutableStateOf(true) }
     var errorText by remember { mutableStateOf("") }
+    var showMoveDialog by remember { mutableStateOf(false) }
+    var showDeleteConfirm by remember { mutableStateOf(false) }
+    var folderOptions by remember { mutableStateOf(listOf<String>()) }
+    var pendingAction by remember { mutableStateOf(PendingAction.NONE) }
+    val scope = rememberCoroutineScope()
+    val isBusy = pendingAction != PendingAction.NONE
 
     LaunchedEffect(header.msgNum) {
         val result = ImapConnector.fetchMessageBody(
             host = host, port = port, email = email, password = password,
-            msgNum = header.msgNum
+            msgNum = header.msgNum, folderName = folderName
         )
         isLoading = false
         result.fold(
             onSuccess = { body = it },
             onFailure = { errorText = "Ошибка: ${it.message}" }
         )
+    }
+
+    fun runDelete() {
+        pendingAction = PendingAction.DELETE
+        scope.launch {
+            val result = if (ImapConnector.isTrashFolder(folderName)) {
+                ImapConnector.deleteMessage(host, port, email, password, header.msgNum, folderName)
+            } else {
+                ImapConnector.moveToTrash(host, port, email, password, header.msgNum, folderName)
+            }
+            pendingAction = PendingAction.NONE
+            result.fold(
+                onSuccess = { onActionDone() },
+                onFailure = { errorText = "Ошибка удаления: ${it.message}" }
+            )
+        }
+    }
+
+    fun runRestore() {
+        pendingAction = PendingAction.RESTORE
+        scope.launch {
+            val result = ImapConnector.restoreFromTrash(host, port, email, password, header.msgNum, folderName)
+            pendingAction = PendingAction.NONE
+            result.fold(
+                onSuccess = { onActionDone() },
+                onFailure = { errorText = "Ошибка восстановления: ${it.message}" }
+            )
+        }
+    }
+
+    fun runSpam() {
+        pendingAction = PendingAction.SPAM
+        scope.launch {
+            val result = ImapConnector.moveToSpam(host, port, email, password, header.msgNum, folderName)
+            pendingAction = PendingAction.NONE
+            result.fold(
+                onSuccess = { onActionDone() },
+                onFailure = { errorText = "Ошибка: ${it.message}" }
+            )
+        }
     }
 
     Column(
@@ -307,7 +387,47 @@ fun MessageScreen(
             IconButton(onClick = onBack) {
                 Icon(Icons.Filled.ArrowBack, contentDescription = "Назад")
             }
-            Text("Письмо", style = MaterialTheme.typography.titleLarge)
+            Text("Письмо", style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f))
+        }
+
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+            horizontalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            if (ImapConnector.isTrashFolder(folderName)) {
+                TextButton(onClick = { showDeleteConfirm = true }, enabled = !isBusy) {
+                    Text("Удалить насовсем", color = MaterialTheme.colorScheme.error)
+                }
+                TextButton(onClick = { runRestore() }, enabled = !isBusy) {
+                    Text(if (pendingAction == PendingAction.RESTORE) "..." else "Восстановить")
+                }
+            } else {
+                TextButton(
+                    onClick = {
+                        showMoveDialog = true
+                        pendingAction = PendingAction.MOVE
+                        scope.launch {
+                            val result = ImapConnector.listFolders(host, port, email, password)
+                            pendingAction = PendingAction.NONE
+                            result.fold(
+                                onSuccess = { folders -> folderOptions = folders.filter { it != folderName } },
+                                onFailure = { errorText = "Ошибка получения папок: ${it.message}" }
+                            )
+                        }
+                    },
+                    enabled = !isBusy
+                ) { Text("Переместить") }
+
+                TextButton(onClick = { showDeleteConfirm = true }, enabled = !isBusy) {
+                    Text("Удалить", color = MaterialTheme.colorScheme.error)
+                }
+
+                if (!ImapConnector.isSpamFolder(folderName)) {
+                    TextButton(onClick = { runSpam() }, enabled = !isBusy) {
+                        Text(if (pendingAction == PendingAction.SPAM) "..." else "СПАМ")
+                    }
+                }
+            }
         }
 
         Spacer(modifier = Modifier.height(8.dp))
@@ -318,7 +438,7 @@ fun MessageScreen(
 
         Divider(modifier = Modifier.padding(vertical = 12.dp))
 
-        if (isLoading) {
+        if (isLoading || pendingAction != PendingAction.NONE) {
             Box(modifier = Modifier.fillMaxWidth().padding(16.dp), contentAlignment = Alignment.Center) {
                 CircularProgressIndicator()
             }
@@ -330,6 +450,124 @@ fun MessageScreen(
 
         Column(modifier = Modifier.weight(1f).verticalScroll(rememberScrollState())) {
             Text(body)
+        }
+    }
+
+    if (showDeleteConfirm) {
+        val isPermanent = ImapConnector.isTrashFolder(folderName)
+        AlertDialog(
+            onDismissRequest = { showDeleteConfirm = false },
+            title = { Text(if (isPermanent) "Удалить письмо навсегда?" else "Переместить в корзину?") },
+            text = {
+                Text(if (isPermanent) "Это действие нельзя отменить." else "Письмо можно будет восстановить из корзины.")
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    showDeleteConfirm = false
+                    runDelete()
+                }) { Text(if (isPermanent) "Удалить навсегда" else "Удалить", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = {
+                TextButton(onClick = { showDeleteConfirm = false }) { Text("Отмена") }
+            }
+        )
+    }
+
+    if (showMoveDialog) {
+        AlertDialog(
+            onDismissRequest = { if (!isBusy) showMoveDialog = false },
+            title = { Text("Переместить в папку") },
+            text = {
+                if (folderOptions.isEmpty()) {
+                    CircularProgressIndicator()
+                } else {
+                    Column {
+                        folderOptions.forEach { folder ->
+                            TextButton(
+                                onClick = {
+                                    pendingAction = PendingAction.MOVE
+                                    scope.launch {
+                                        val result = ImapConnector.moveMessage(
+                                            host = host, port = port, email = email, password = password,
+                                            msgNum = header.msgNum, fromFolder = folderName, toFolder = folder
+                                        )
+                                        pendingAction = PendingAction.NONE
+                                        showMoveDialog = false
+                                        result.fold(
+                                            onSuccess = { onActionDone() },
+                                            onFailure = { errorText = "Ошибка перемещения: ${it.message}" }
+                                        )
+                                    }
+                                },
+                                enabled = !isBusy,
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Text(ImapConnector.displayNameFor(folder))
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showMoveDialog = false }, enabled = !isBusy) {
+                    Text("Отмена")
+                }
+            }
+        )
+    }
+}
+
+@Composable
+fun FolderListScreen(
+    host: String,
+    port: Int,
+    email: String,
+    password: String,
+    onSelectFolder: (String) -> Unit,
+    onBack: () -> Unit
+) {
+    var folders by remember { mutableStateOf(listOf<String>()) }
+    var isLoading by remember { mutableStateOf(true) }
+    var errorText by remember { mutableStateOf("") }
+
+    LaunchedEffect(Unit) {
+        val result = ImapConnector.listFolders(host, port, email, password)
+        isLoading = false
+        result.fold(
+            onSuccess = { folders = it },
+            onFailure = { errorText = "Ошибка: ${it.message}" }
+        )
+    }
+
+    Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            IconButton(onClick = onBack) {
+                Icon(Icons.Filled.ArrowBack, contentDescription = "Назад")
+            }
+            Text("Папки", style = MaterialTheme.typography.titleLarge)
+        }
+
+        if (isLoading) {
+            Box(modifier = Modifier.fillMaxWidth().padding(16.dp), contentAlignment = Alignment.Center) {
+                CircularProgressIndicator()
+            }
+        }
+
+        if (errorText.isNotEmpty()) {
+            Text(errorText, color = MaterialTheme.colorScheme.error)
+        }
+
+        LazyColumn {
+            items(folders) { folder ->
+                Text(
+                    ImapConnector.displayNameFor(folder),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { onSelectFolder(folder) }
+                        .padding(vertical = 12.dp)
+                )
+                Divider()
+            }
         }
     }
 }
