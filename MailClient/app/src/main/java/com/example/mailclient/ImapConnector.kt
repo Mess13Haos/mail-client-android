@@ -5,6 +5,8 @@ import kotlinx.coroutines.withContext
 import java.util.Properties
 import javax.mail.FetchProfile
 import javax.mail.Folder
+import javax.mail.Multipart
+import javax.mail.Part
 import javax.mail.Session
 import javax.mail.Store
 
@@ -21,6 +23,7 @@ object ImapConnector {
     )
 
     data class MailHeader(
+        val msgNum: Int,
         val subject: String,
         val from: String,
         val date: String
@@ -79,6 +82,7 @@ object ImapConnector {
 
             val headers = rawMessages.map { msg ->
                 MailHeader(
+                    msgNum = msg.messageNumber,
                     subject = msg.subject ?: "(без темы)",
                     from = msg.from?.joinToString(", ") { it.toString() } ?: "(неизвестно)",
                     date = msg.sentDate?.toString() ?: ""
@@ -92,5 +96,69 @@ object ImapConnector {
             try { folder?.close(false) } catch (_: Exception) {}
             try { store?.close() } catch (_: Exception) {}
         }
+    }
+
+    suspend fun fetchMessageBody(
+        host: String,
+        port: Int,
+        email: String,
+        password: String,
+        msgNum: Int,
+        folderName: String = "INBOX"
+    ): Result<String> = withContext(Dispatchers.IO) {
+        var store: Store? = null
+        var folder: Folder? = null
+        try {
+            store = openStore(host, port, email, password)
+            folder = store.getFolder(folderName)
+            folder.open(Folder.READ_ONLY)
+
+            val message = folder.getMessage(msgNum)
+            val text = extractText(message)
+
+            Result.success(text.ifBlank { "(письмо не содержит текста)" })
+        } catch (e: Exception) {
+            Result.failure(e)
+        } finally {
+            try { folder?.close(false) } catch (_: Exception) {}
+            try { store?.close() } catch (_: Exception) {}
+        }
+    }
+
+    private fun extractText(part: Part): String {
+        return when {
+            part.isMimeType("text/plain") -> part.content as? String ?: ""
+            part.isMimeType("text/html") -> stripHtml(part.content as? String ?: "")
+            part.isMimeType("multipart/*") -> {
+                val mp = part.content as Multipart
+                var plain: String? = null
+                var html: String? = null
+                for (i in 0 until mp.count) {
+                    val bodyPart = mp.getBodyPart(i)
+                    when {
+                        bodyPart.isMimeType("text/plain") && plain == null ->
+                            plain = bodyPart.content as? String
+                        bodyPart.isMimeType("text/html") && html == null ->
+                            html = bodyPart.content as? String
+                        bodyPart.isMimeType("multipart/*") -> {
+                            val nested = extractText(bodyPart)
+                            if (nested.isNotBlank() && plain == null) plain = nested
+                        }
+                    }
+                }
+                plain ?: html?.let { stripHtml(it) } ?: ""
+            }
+            else -> ""
+        }
+    }
+
+    private fun stripHtml(html: String): String {
+        return html
+            .replace(Regex("<br\\s*/?>", RegexOption.IGNORE_CASE), "\n")
+            .replace(Regex("<[^>]*>"), " ")
+            .replace("&nbsp;", " ")
+            .replace("&amp;", "&")
+            .replace(Regex("[ \\t]+"), " ")
+            .trim()
     }
 }
