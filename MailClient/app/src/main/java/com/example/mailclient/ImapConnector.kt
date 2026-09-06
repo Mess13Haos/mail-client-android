@@ -13,14 +13,20 @@ import javax.mail.Store
 
 object ImapConnector {
 
-    data class ServerPreset(val label: String, val host: String, val port: Int)
+    data class ServerPreset(
+        val label: String,
+        val host: String,
+        val port: Int,
+        val smtpHost: String,
+        val smtpPort: Int
+    )
 
     val presets = listOf(
-        ServerPreset("Yandex", "imap.yandex.ru", 993),
-        ServerPreset("Mail.ru", "imap.mail.ru", 993),
-        ServerPreset("Gmail", "imap.gmail.com", 993),
-        ServerPreset("Yahoo", "imap.mail.yahoo.com", 993),
-        ServerPreset("Свой сервер...", "", 993)
+        ServerPreset("Yandex", "imap.yandex.ru", 993, "smtp.yandex.ru", 465),
+        ServerPreset("Mail.ru", "imap.mail.ru", 993, "smtp.mail.ru", 465),
+        ServerPreset("Gmail", "imap.gmail.com", 993, "smtp.gmail.com", 465),
+        ServerPreset("Yahoo", "imap.mail.yahoo.com", 993, "smtp.mail.yahoo.com", 465),
+        ServerPreset("Свой сервер...", "", 993, "", 465)
     )
 
     data class MailHeader(
@@ -51,6 +57,20 @@ object ImapConnector {
 
     fun isTrashFolder(folderName: String): Boolean {
         return trashFolderNames.any { candidate -> folderName.equals(candidate, ignoreCase = true) }
+    }
+
+    fun displayNameFor(folderName: String): String {
+        return when {
+            folderName.equals("INBOX", ignoreCase = true) -> "Входящие"
+            isTrashFolder(folderName) -> "Корзина"
+            isSpamFolder(folderName) -> "Спам"
+            else -> folderName
+        }
+    }
+
+    fun extractEmailAddress(from: String): String {
+        val match = Regex("<([^>]+)>").find(from)
+        return match?.groupValues?.get(1) ?: from.trim()
     }
 
     private fun openStore(host: String, port: Int, email: String, password: String): Store {
@@ -281,15 +301,6 @@ object ImapConnector {
         fromFolder: String
     ): Result<Unit> = withContext(Dispatchers.IO) {
         moveMessage(host, port, email, password, msgNum, fromFolder, "INBOX")
-    }
-
-    fun displayNameFor(folderName: String): String {
-        return when {
-            folderName.equals("INBOX", ignoreCase = true) -> "Входящие"
-            isTrashFolder(folderName) -> "Корзина"
-            isSpamFolder(folderName) -> "Спам"
-            else -> folderName
-        }
     }
 
     private fun extractText(part: Part): String {

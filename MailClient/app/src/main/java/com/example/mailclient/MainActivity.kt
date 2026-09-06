@@ -10,6 +10,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
@@ -17,6 +18,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
@@ -34,28 +36,94 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+data class ComposePrefill(
+    val to: String = "",
+    val subject: String = "",
+    val body: String = ""
+)
+
 sealed class Screen {
+    object CheckingSavedLogin : Screen()
     object Login : Screen()
     object Mailbox : Screen()
     data class MessageView(val header: ImapConnector.MailHeader) : Screen()
     object FolderList : Screen()
+    data class Compose(val prefill: ComposePrefill = ComposePrefill()) : Screen()
 }
 
 @Composable
 fun AppRoot() {
-    var screen by remember { mutableStateOf<Screen>(Screen.Login) }
+    val context = LocalContext.current
+    var screen by remember { mutableStateOf<Screen>(Screen.CheckingSavedLogin) }
     var host by remember { mutableStateOf("") }
     var port by remember { mutableStateOf(993) }
+    var smtpHost by remember { mutableStateOf("") }
+    var smtpPort by remember { mutableStateOf(465) }
     var email by remember { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
     var currentFolder by remember { mutableStateOf("INBOX") }
     var mailboxReloadKey by remember { mutableStateOf(0) }
+    var savedLoginError by remember { mutableStateOf("") }
+    var updateInfo by remember { mutableStateOf<UpdateChecker.ReleaseInfo?>(null) }
+    var showUpdateDialog by remember { mutableStateOf(false) }
+    var isDownloading by remember { mutableStateOf(false) }
+
+    LaunchedEffect(Unit) {
+        val result = UpdateChecker.checkForUpdate(BuildConfig.VERSION_NAME)
+        result.onSuccess { info ->
+            if (info != null) {
+                updateInfo = info
+                showUpdateDialog = true
+            }
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        val saved = CredentialStore.load(context)
+        if (saved == null) {
+            screen = Screen.Login
+        } else {
+            val preset = ImapConnector.presets.firstOrNull { it.label == saved.presetLabel }
+                ?: ImapConnector.presets[0]
+            val result = ImapConnector.fetchMessages(
+                host = preset.host, port = preset.port,
+                email = saved.email, password = saved.password, offset = 0
+            )
+            result.fold(
+                onSuccess = {
+                    host = preset.host; port = preset.port
+                    smtpHost = preset.smtpHost; smtpPort = preset.smtpPort
+                    email = saved.email; password = saved.password
+                    currentFolder = "INBOX"
+                    screen = Screen.Mailbox
+                },
+                onFailure = {
+                    savedLoginError = "Не удалось войти автоматически: ${it.message}"
+                    screen = Screen.Login
+                }
+            )
+        }
+    }
 
     when (val current = screen) {
+        is Screen.CheckingSavedLogin -> Box(
+            modifier = Modifier.fillMaxSize(),
+            contentAlignment = Alignment.Center
+        ) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                CircularProgressIndicator()
+                Spacer(modifier = Modifier.height(8.dp))
+                Text("Проверка сохранённого входа...")
+            }
+        }
         is Screen.Login -> LoginScreen(
-            onLoginSuccess = { h, p, e, pass ->
-                host = h; port = p; email = e; password = pass
+            initialError = savedLoginError,
+            onLoginSuccess = { preset, e, pass ->
+                host = preset.host; port = preset.port
+                smtpHost = preset.smtpHost; smtpPort = preset.smtpPort
+                email = e; password = pass
                 currentFolder = "INBOX"
+                CredentialStore.save(context, preset.label, e, pass)
                 screen = Screen.Mailbox
             }
         )
@@ -63,9 +131,13 @@ fun AppRoot() {
             host = host, port = port, email = email, password = password,
             folderName = currentFolder,
             reloadKey = mailboxReloadKey,
-            onLogout = { screen = Screen.Login },
+            onLogout = {
+                CredentialStore.clear(context)
+                screen = Screen.Login
+            },
             onOpenMessage = { header -> screen = Screen.MessageView(header) },
-            onOpenFolders = { screen = Screen.FolderList }
+            onOpenFolders = { screen = Screen.FolderList },
+            onCompose = { screen = Screen.Compose() }
         )
         is Screen.MessageView -> MessageScreen(
             host = host, port = port, email = email, password = password,
@@ -75,7 +147,8 @@ fun AppRoot() {
             onActionDone = {
                 mailboxReloadKey++
                 screen = Screen.Mailbox
-            }
+            },
+            onReplyOrForward = { prefill -> screen = Screen.Compose(prefill) }
         )
         is Screen.FolderList -> FolderListScreen(
             host = host, port = port, email = email, password = password,
@@ -86,17 +159,60 @@ fun AppRoot() {
             },
             onBack = { screen = Screen.Mailbox }
         )
+        is Screen.Compose -> ComposeScreen(
+            smtpHost = smtpHost, smtpPort = smtpPort,
+            fromEmail = email, password = password,
+            prefill = current.prefill,
+            onBack = { screen = Screen.Mailbox },
+            onSent = { screen = Screen.Mailbox }
+        )
+    }
+
+    if (showUpdateDialog && updateInfo != null) {
+        val info = updateInfo!!
+        AlertDialog(
+            onDismissRequest = { if (!isDownloading) showUpdateDialog = false },
+            title = { Text("Доступно обновление ${info.version}") },
+            text = {
+                Column {
+                    if (info.notes.isNotBlank()) {
+                        Text(info.notes)
+                        Spacer(modifier = Modifier.height(8.dp))
+                    }
+                    if (isDownloading) {
+                        Text("Скачивание запущено, следите за уведомлением...")
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        isDownloading = true
+                        UpdateChecker.downloadAndInstall(context, info.downloadUrl) {}
+                    },
+                    enabled = !isDownloading
+                ) { Text("Скачать и установить") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showUpdateDialog = false }, enabled = !isDownloading) {
+                    Text("Позже")
+                }
+            }
+        )
     }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun LoginScreen(onLoginSuccess: (String, Int, String, String) -> Unit) {
+fun LoginScreen(
+    initialError: String = "",
+    onLoginSuccess: (ImapConnector.ServerPreset, String, String) -> Unit
+) {
     var selectedPreset by remember { mutableStateOf(ImapConnector.presets[0]) }
     var email by remember { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
     var passwordVisible by remember { mutableStateOf(false) }
-    var errorText by remember { mutableStateOf("") }
+    var errorText by remember { mutableStateOf(initialError) }
     var isLoading by remember { mutableStateOf(false) }
     var expanded by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
@@ -169,7 +285,7 @@ fun LoginScreen(onLoginSuccess: (String, Int, String, String) -> Unit) {
                     isLoading = false
                     result.fold(
                         onSuccess = {
-                            onLoginSuccess(selectedPreset.host, selectedPreset.port, email, password)
+                            onLoginSuccess(selectedPreset, email, password)
                         },
                         onFailure = { error ->
                             errorText = "Ошибка: ${error.message}"
@@ -199,7 +315,8 @@ fun MailboxScreen(
     reloadKey: Int,
     onLogout: () -> Unit,
     onOpenMessage: (ImapConnector.MailHeader) -> Unit,
-    onOpenFolders: () -> Unit
+    onOpenFolders: () -> Unit,
+    onCompose: () -> Unit
 ) {
     var offset by remember { mutableStateOf(0) }
     var totalCount by remember { mutableStateOf(0) }
@@ -233,71 +350,79 @@ fun MailboxScreen(
         loadPage(0)
     }
 
-    Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Column {
-                Text("Почта", style = MaterialTheme.typography.titleLarge)
-                TextButton(onClick = onOpenFolders, contentPadding = PaddingValues(0.dp)) {
-                    Text("Папка: ${ImapConnector.displayNameFor(folderName)} ▾")
-                }
+    Scaffold(
+        floatingActionButton = {
+            FloatingActionButton(onClick = onCompose) {
+                Icon(Icons.Filled.Add, contentDescription = "Написать письмо")
             }
-            TextButton(onClick = onLogout) { Text("Выйти") }
         }
-
-        if (isLoading) {
-            Box(
-                modifier = Modifier.fillMaxWidth().padding(16.dp),
-                contentAlignment = Alignment.Center
+    ) { innerPadding ->
+        Column(modifier = Modifier.fillMaxSize().padding(innerPadding).padding(16.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                CircularProgressIndicator()
+                Column {
+                    Text("Почта", style = MaterialTheme.typography.titleLarge)
+                    TextButton(onClick = onOpenFolders, contentPadding = PaddingValues(0.dp)) {
+                        Text("Папка: ${ImapConnector.displayNameFor(folderName)} ▾")
+                    }
+                }
+                TextButton(onClick = onLogout) { Text("Выйти") }
             }
-        }
 
-        if (errorText.isNotEmpty()) {
-            Text(errorText, color = MaterialTheme.colorScheme.error)
-        }
-
-        LazyColumn(modifier = Modifier.weight(1f)) {
-            items(messages) { mail ->
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clickable { onOpenMessage(mail) }
-                        .padding(vertical = 8.dp)
+            if (isLoading) {
+                Box(
+                    modifier = Modifier.fillMaxWidth().padding(16.dp),
+                    contentAlignment = Alignment.Center
                 ) {
-                    Text(mail.from, fontWeight = FontWeight.Bold)
-                    Text(mail.subject)
-                    Text(mail.date, style = MaterialTheme.typography.bodySmall)
+                    CircularProgressIndicator()
                 }
-                Divider()
             }
-        }
 
-        val currentEnd = offset + messages.size
-        Text(
-            "Показаны ${if (messages.isEmpty()) 0 else offset + 1}–$currentEnd из $totalCount",
-            style = MaterialTheme.typography.bodySmall
-        )
-
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
-            horizontalArrangement = Arrangement.SpaceBetween
-        ) {
-            Button(
-                onClick = { loadPage(maxOf(0, offset - pageSize)) },
-                enabled = !isLoading && offset > 0
-            ) {
-                Text("← Назад")
+            if (errorText.isNotEmpty()) {
+                Text(errorText, color = MaterialTheme.colorScheme.error)
             }
-            Button(
-                onClick = { loadPage(offset + pageSize) },
-                enabled = !isLoading && currentEnd < totalCount
+
+            LazyColumn(modifier = Modifier.weight(1f)) {
+                items(messages) { mail ->
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { onOpenMessage(mail) }
+                            .padding(vertical = 8.dp)
+                    ) {
+                        Text(mail.from, fontWeight = FontWeight.Bold)
+                        Text(mail.subject)
+                        Text(mail.date, style = MaterialTheme.typography.bodySmall)
+                    }
+                    Divider()
+                }
+            }
+
+            val currentEnd = offset + messages.size
+            Text(
+                "Показаны ${if (messages.isEmpty()) 0 else offset + 1}–$currentEnd из $totalCount",
+                style = MaterialTheme.typography.bodySmall
+            )
+
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(top = 8.dp, bottom = 72.dp),
+                horizontalArrangement = Arrangement.SpaceBetween
             ) {
-                Text("Вперёд →")
+                Button(
+                    onClick = { loadPage(maxOf(0, offset - pageSize)) },
+                    enabled = !isLoading && offset > 0
+                ) {
+                    Text("← Назад")
+                }
+                Button(
+                    onClick = { loadPage(offset + pageSize) },
+                    enabled = !isLoading && currentEnd < totalCount
+                ) {
+                    Text("Вперёд →")
+                }
             }
         }
     }
@@ -314,7 +439,8 @@ fun MessageScreen(
     header: ImapConnector.MailHeader,
     folderName: String,
     onBack: () -> Unit,
-    onActionDone: () -> Unit
+    onActionDone: () -> Unit,
+    onReplyOrForward: (ComposePrefill) -> Unit
 ) {
     var body by remember { mutableStateOf("") }
     var isLoading by remember { mutableStateOf(true) }
@@ -336,6 +462,14 @@ fun MessageScreen(
             onSuccess = { body = it },
             onFailure = { errorText = "Ошибка: ${it.message}" }
         )
+    }
+
+    fun quotedOriginal(): String {
+        return "\n\n\n---------- Исходное письмо ----------\n" +
+                "От: ${header.from}\n" +
+                "Дата: ${header.date}\n" +
+                "Тема: ${header.subject}\n\n" +
+                body
     }
 
     fun runDelete() {
@@ -388,6 +522,39 @@ fun MessageScreen(
                 Icon(Icons.Filled.ArrowBack, contentDescription = "Назад")
             }
             Text("Письмо", style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f))
+        }
+
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+            horizontalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            TextButton(
+                onClick = {
+                    onReplyOrForward(
+                        ComposePrefill(
+                            to = ImapConnector.extractEmailAddress(header.from),
+                            subject = if (header.subject.startsWith("Re:", ignoreCase = true))
+                                header.subject else "Re: ${header.subject}",
+                            body = quotedOriginal()
+                        )
+                    )
+                },
+                enabled = !isBusy && !isLoading
+            ) { Text("Ответить") }
+
+            TextButton(
+                onClick = {
+                    onReplyOrForward(
+                        ComposePrefill(
+                            to = "",
+                            subject = if (header.subject.startsWith("Fwd:", ignoreCase = true))
+                                header.subject else "Fwd: ${header.subject}",
+                            body = quotedOriginal()
+                        )
+                    )
+                },
+                enabled = !isBusy && !isLoading
+            ) { Text("Переслать") }
         }
 
         Row(
@@ -568,6 +735,91 @@ fun FolderListScreen(
                 )
                 Divider()
             }
+        }
+    }
+}
+
+@Composable
+fun ComposeScreen(
+    smtpHost: String,
+    smtpPort: Int,
+    fromEmail: String,
+    password: String,
+    prefill: ComposePrefill,
+    onBack: () -> Unit,
+    onSent: () -> Unit
+) {
+    var to by remember { mutableStateOf(prefill.to) }
+    var subject by remember { mutableStateOf(prefill.subject) }
+    var body by remember { mutableStateOf(prefill.body) }
+    var isSending by remember { mutableStateOf(false) }
+    var errorText by remember { mutableStateOf("") }
+    val scope = rememberCoroutineScope()
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(16.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            IconButton(onClick = onBack) {
+                Icon(Icons.Filled.ArrowBack, contentDescription = "Назад")
+            }
+            Text("Новое письмо", style = MaterialTheme.typography.titleLarge)
+        }
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        OutlinedTextField(
+            value = to,
+            onValueChange = { to = it },
+            label = { Text("Кому") },
+            modifier = Modifier.fillMaxWidth()
+        )
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        OutlinedTextField(
+            value = subject,
+            onValueChange = { subject = it },
+            label = { Text("Тема") },
+            modifier = Modifier.fillMaxWidth()
+        )
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        OutlinedTextField(
+            value = body,
+            onValueChange = { body = it },
+            label = { Text("Текст письма") },
+            modifier = Modifier.fillMaxWidth().weight(1f)
+        )
+
+        if (errorText.isNotEmpty()) {
+            Text(errorText, color = MaterialTheme.colorScheme.error)
+        }
+
+        Button(
+            onClick = {
+                isSending = true
+                errorText = ""
+                scope.launch {
+                    val result = SmtpConnector.sendMail(
+                        smtpHost = smtpHost, smtpPort = smtpPort,
+                        fromEmail = fromEmail, password = password,
+                        toEmail = to, subject = subject, body = body
+                    )
+                    isSending = false
+                    result.fold(
+                        onSuccess = { onSent() },
+                        onFailure = { errorText = "Ошибка отправки: ${it.message}" }
+                    )
+                }
+            },
+            enabled = !isSending && to.isNotBlank(),
+            modifier = Modifier.fillMaxWidth().padding(top = 8.dp)
+        ) {
+            Text(if (isSending) "Отправка..." else "Отправить")
         }
     }
 }
