@@ -10,8 +10,10 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AccountCircle
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.*
@@ -44,11 +46,12 @@ data class ComposePrefill(
 
 sealed class Screen {
     object CheckingSavedLogin : Screen()
-    object Login : Screen()
+    data class Login(val showBack: Boolean = false) : Screen()
     object Mailbox : Screen()
     data class MessageView(val header: ImapConnector.MailHeader) : Screen()
     object FolderList : Screen()
     data class Compose(val prefill: ComposePrefill = ComposePrefill()) : Screen()
+    object AccountList : Screen()
 }
 
 @Composable
@@ -64,9 +67,20 @@ fun AppRoot() {
     var currentFolder by remember { mutableStateOf("INBOX") }
     var mailboxReloadKey by remember { mutableStateOf(0) }
     var savedLoginError by remember { mutableStateOf("") }
+    var accountListError by remember { mutableStateOf("") }
+    var isSwitchingAccount by remember { mutableStateOf(false) }
     var updateInfo by remember { mutableStateOf<UpdateChecker.ReleaseInfo?>(null) }
     var showUpdateDialog by remember { mutableStateOf(false) }
     var isDownloading by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
+
+    fun applyAccount(preset: ImapConnector.ServerPreset, e: String, pass: String) {
+        host = preset.host; port = preset.port
+        smtpHost = preset.smtpHost; smtpPort = preset.smtpPort
+        email = e; password = pass
+        currentFolder = "INBOX"
+        mailboxReloadKey++
+    }
 
     LaunchedEffect(Unit) {
         val result = UpdateChecker.checkForUpdate(BuildConfig.VERSION_NAME)
@@ -79,27 +93,24 @@ fun AppRoot() {
     }
 
     LaunchedEffect(Unit) {
-        val saved = CredentialStore.load(context)
-        if (saved == null) {
-            screen = Screen.Login
+        val active = CredentialStore.getActiveAccount(context)
+        if (active == null) {
+            screen = Screen.Login()
         } else {
-            val preset = ImapConnector.presets.firstOrNull { it.label == saved.presetLabel }
+            val preset = ImapConnector.presets.firstOrNull { it.label == active.presetLabel }
                 ?: ImapConnector.presets[0]
             val result = ImapConnector.fetchMessages(
                 host = preset.host, port = preset.port,
-                email = saved.email, password = saved.password, offset = 0
+                email = active.email, password = active.password, offset = 0
             )
             result.fold(
                 onSuccess = {
-                    host = preset.host; port = preset.port
-                    smtpHost = preset.smtpHost; smtpPort = preset.smtpPort
-                    email = saved.email; password = saved.password
-                    currentFolder = "INBOX"
+                    applyAccount(preset, active.email, active.password)
                     screen = Screen.Mailbox
                 },
                 onFailure = {
-                    savedLoginError = "Не удалось войти автоматически: ${it.message}"
-                    screen = Screen.Login
+                    savedLoginError = "Не удалось войти в ${active.email}: ${it.message}"
+                    screen = Screen.AccountList
                 }
             )
         }
@@ -118,12 +129,11 @@ fun AppRoot() {
         }
         is Screen.Login -> LoginScreen(
             initialError = savedLoginError,
+            showBack = current.showBack,
+            onBack = { screen = Screen.AccountList },
             onLoginSuccess = { preset, e, pass ->
-                host = preset.host; port = preset.port
-                smtpHost = preset.smtpHost; smtpPort = preset.smtpPort
-                email = e; password = pass
-                currentFolder = "INBOX"
-                CredentialStore.save(context, preset.label, e, pass)
+                CredentialStore.addOrUpdateAccount(context, preset.label, e, pass)
+                applyAccount(preset, e, pass)
                 screen = Screen.Mailbox
             }
         )
@@ -131,10 +141,7 @@ fun AppRoot() {
             host = host, port = port, email = email, password = password,
             folderName = currentFolder,
             reloadKey = mailboxReloadKey,
-            onLogout = {
-                CredentialStore.clear(context)
-                screen = Screen.Login
-            },
+            onOpenAccounts = { accountListError = ""; screen = Screen.AccountList },
             onOpenMessage = { header -> screen = Screen.MessageView(header) },
             onOpenFolders = { screen = Screen.FolderList },
             onCompose = { screen = Screen.Compose() }
@@ -165,6 +172,66 @@ fun AppRoot() {
             prefill = current.prefill,
             onBack = { screen = Screen.Mailbox },
             onSent = { screen = Screen.Mailbox }
+        )
+        is Screen.AccountList -> AccountListScreen(
+            accounts = CredentialStore.loadAccounts(context),
+            activeEmail = email,
+            errorText = accountListError,
+            isBusy = isSwitchingAccount,
+            onSelectAccount = { account ->
+                if (!account.email.equals(email, ignoreCase = true)) {
+                    isSwitchingAccount = true
+                    accountListError = ""
+                    scope.launch {
+                        val preset = ImapConnector.presets.firstOrNull { it.label == account.presetLabel }
+                            ?: ImapConnector.presets[0]
+                        val result = ImapConnector.fetchMessages(
+                            host = preset.host, port = preset.port,
+                            email = account.email, password = account.password, offset = 0
+                        )
+                        isSwitchingAccount = false
+                        result.fold(
+                            onSuccess = {
+                                CredentialStore.setActiveEmail(context, account.email)
+                                applyAccount(preset, account.email, account.password)
+                                screen = Screen.Mailbox
+                            },
+                            onFailure = {
+                                accountListError = "Не удалось войти в ${account.email}: ${it.message}"
+                            }
+                        )
+                    }
+                } else {
+                    screen = Screen.Mailbox
+                }
+            },
+            onAddAccount = { screen = Screen.Login(showBack = true) },
+            onRemoveAccount = { account ->
+                CredentialStore.removeAccount(context, account.email)
+                if (account.email.equals(email, ignoreCase = true)) {
+                    val next = CredentialStore.getActiveAccount(context)
+                    if (next == null) {
+                        email = ""
+                        screen = Screen.Login()
+                    } else {
+                        isSwitchingAccount = true
+                        scope.launch {
+                            val preset = ImapConnector.presets.firstOrNull { it.label == next.presetLabel }
+                                ?: ImapConnector.presets[0]
+                            val result = ImapConnector.fetchMessages(
+                                host = preset.host, port = preset.port,
+                                email = next.email, password = next.password, offset = 0
+                            )
+                            isSwitchingAccount = false
+                            result.fold(
+                                onSuccess = { applyAccount(preset, next.email, next.password) },
+                                onFailure = { accountListError = "Не удалось войти в ${next.email}: ${it.message}" }
+                            )
+                        }
+                    }
+                }
+            },
+            onBack = { screen = Screen.Mailbox }
         )
     }
 
@@ -206,6 +273,8 @@ fun AppRoot() {
 @Composable
 fun LoginScreen(
     initialError: String = "",
+    showBack: Boolean = false,
+    onBack: () -> Unit = {},
     onLoginSuccess: (ImapConnector.ServerPreset, String, String) -> Unit
 ) {
     var selectedPreset by remember { mutableStateOf(ImapConnector.presets[0]) }
@@ -224,7 +293,14 @@ fun LoginScreen(
             .verticalScroll(rememberScrollState()),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        Text("Вход в почту", style = MaterialTheme.typography.titleLarge)
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            if (showBack) {
+                IconButton(onClick = onBack) {
+                    Icon(Icons.Filled.ArrowBack, contentDescription = "Назад")
+                }
+            }
+            Text("Вход в почту", style = MaterialTheme.typography.titleLarge)
+        }
 
         ExposedDropdownMenuBox(expanded = expanded, onExpandedChange = { expanded = it }) {
             OutlinedTextField(
@@ -306,6 +382,96 @@ fun LoginScreen(
 }
 
 @Composable
+fun AccountListScreen(
+    accounts: List<CredentialStore.SavedAccount>,
+    activeEmail: String,
+    errorText: String,
+    isBusy: Boolean,
+    onSelectAccount: (CredentialStore.SavedAccount) -> Unit,
+    onAddAccount: () -> Unit,
+    onRemoveAccount: (CredentialStore.SavedAccount) -> Unit,
+    onBack: () -> Unit
+) {
+    var pendingDelete by remember { mutableStateOf<CredentialStore.SavedAccount?>(null) }
+
+    Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            IconButton(onClick = onBack) {
+                Icon(Icons.Filled.ArrowBack, contentDescription = "Назад")
+            }
+            Text("Аккаунты", style = MaterialTheme.typography.titleLarge)
+        }
+
+        if (isBusy) {
+            Box(modifier = Modifier.fillMaxWidth().padding(16.dp), contentAlignment = Alignment.Center) {
+                CircularProgressIndicator()
+            }
+        }
+
+        if (errorText.isNotEmpty()) {
+            Text(errorText, color = MaterialTheme.colorScheme.error)
+        }
+
+        LazyColumn(modifier = Modifier.weight(1f)) {
+            items(accounts) { account ->
+                val isActive = account.email.equals(activeEmail, ignoreCase = true)
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable(enabled = !isBusy) { onSelectAccount(account) }
+                        .padding(vertical = 12.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column {
+                        Text(
+                            account.email,
+                            fontWeight = if (isActive) FontWeight.Bold else FontWeight.Normal
+                        )
+                        Text(
+                            if (isActive) "${account.presetLabel} · активен" else account.presetLabel,
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    }
+                    IconButton(onClick = { pendingDelete = account }, enabled = !isBusy) {
+                        Icon(Icons.Filled.Delete, contentDescription = "Удалить аккаунт")
+                    }
+                }
+                Divider()
+            }
+        }
+
+        Button(
+            onClick = onAddAccount,
+            enabled = !isBusy,
+            modifier = Modifier.fillMaxWidth().padding(top = 8.dp)
+        ) {
+            Icon(Icons.Filled.Add, contentDescription = null)
+            Spacer(modifier = Modifier.width(4.dp))
+            Text("Добавить аккаунт")
+        }
+    }
+
+    val toDelete = pendingDelete
+    if (toDelete != null) {
+        AlertDialog(
+            onDismissRequest = { pendingDelete = null },
+            title = { Text("Удалить аккаунт?") },
+            text = { Text("${toDelete.email} будет забыт (пароль удалён из приложения).") },
+            confirmButton = {
+                TextButton(onClick = {
+                    onRemoveAccount(toDelete)
+                    pendingDelete = null
+                }) { Text("Удалить", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingDelete = null }) { Text("Отмена") }
+            }
+        )
+    }
+}
+
+@Composable
 fun MailboxScreen(
     host: String,
     port: Int,
@@ -313,7 +479,7 @@ fun MailboxScreen(
     password: String,
     folderName: String,
     reloadKey: Int,
-    onLogout: () -> Unit,
+    onOpenAccounts: () -> Unit,
     onOpenMessage: (ImapConnector.MailHeader) -> Unit,
     onOpenFolders: () -> Unit,
     onCompose: () -> Unit
@@ -364,12 +530,14 @@ fun MailboxScreen(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Column {
-                    Text("Почта", style = MaterialTheme.typography.titleLarge)
+                    Text(email, style = MaterialTheme.typography.titleMedium)
                     TextButton(onClick = onOpenFolders, contentPadding = PaddingValues(0.dp)) {
                         Text("Папка: ${ImapConnector.displayNameFor(folderName)} ▾")
                     }
                 }
-                TextButton(onClick = onLogout) { Text("Выйти") }
+                IconButton(onClick = onOpenAccounts) {
+                    Icon(Icons.Filled.AccountCircle, contentDescription = "Аккаунты")
+                }
             }
 
             if (isLoading) {
