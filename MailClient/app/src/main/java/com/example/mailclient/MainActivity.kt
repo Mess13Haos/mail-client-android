@@ -26,6 +26,8 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.launch
+import android.webkit.WebView
+import androidx.compose.ui.viewinterop.AndroidView
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -610,7 +612,7 @@ fun MessageScreen(
     onActionDone: () -> Unit,
     onReplyOrForward: (ComposePrefill) -> Unit
 ) {
-    var body by remember { mutableStateOf("") }
+    var body by remember { mutableStateOf(ImapConnector.MailBody("", "")) }
     var isLoading by remember { mutableStateOf(true) }
     var errorText by remember { mutableStateOf("") }
     var showMoveDialog by remember { mutableStateOf(false) }
@@ -637,7 +639,7 @@ fun MessageScreen(
                 "От: ${header.from}\n" +
                 "Дата: ${header.date}\n" +
                 "Тема: ${header.subject}\n\n" +
-                body
+                body.plainText
     }
 
     fun runDelete() {
@@ -783,9 +785,19 @@ fun MessageScreen(
             Text(errorText, color = MaterialTheme.colorScheme.error)
         }
 
-        Column(modifier = Modifier.weight(1f).verticalScroll(rememberScrollState())) {
-            Text(body)
-        }
+        AndroidView(
+            factory = { ctx ->
+                WebView(ctx).apply {
+                    settings.javaScriptEnabled = false
+                    settings.loadsImagesAutomatically = true
+                    settings.domStorageEnabled = false
+                }
+            },
+            update = { webView ->
+                webView.loadDataWithBaseURL(null, body.displayHtml, "text/html", "UTF-8", null)
+            },
+            modifier = Modifier.fillMaxWidth().weight(1f)
+        )
     }
 
     if (showDeleteConfirm) {

@@ -137,6 +137,8 @@ object ImapConnector {
         }
     }
 
+    data class MailBody(val displayHtml: String, val plainText: String)
+
     suspend fun fetchMessageBody(
         host: String,
         port: Int,
@@ -144,7 +146,7 @@ object ImapConnector {
         password: String,
         msgNum: Int,
         folderName: String = "INBOX"
-    ): Result<String> = withContext(Dispatchers.IO) {
+    ): Result<MailBody> = withContext(Dispatchers.IO) {
         var store: Store? = null
         var folder: Folder? = null
         try {
@@ -153,9 +155,17 @@ object ImapConnector {
             folder.open(Folder.READ_ONLY)
 
             val message = folder.getMessage(msgNum)
-            val text = extractText(message)
+            val (plain, html) = extractParts(message)
 
-            Result.success(text.ifBlank { "(письмо не содержит текста)" })
+            val plainText = (plain ?: html?.let { stripHtml(it) } ?: "").ifBlank { "(письмо не содержит текста)" }
+
+            val displayHtml = if (html != null) {
+                wrapHtml(html)
+            } else {
+                wrapHtml(escapeHtml(plainText).replace("\n", "<br>"))
+            }
+
+            Result.success(MailBody(displayHtml, plainText))
         } catch (e: Exception) {
             Result.failure(e)
         } finally {
@@ -303,10 +313,10 @@ object ImapConnector {
         moveMessage(host, port, email, password, msgNum, fromFolder, "INBOX")
     }
 
-    private fun extractText(part: Part): String {
+    private fun extractParts(part: Part): Pair<String?, String?> {
         return when {
-            part.isMimeType("text/plain") -> part.content as? String ?: ""
-            part.isMimeType("text/html") -> stripHtml(part.content as? String ?: "")
+            part.isMimeType("text/plain") -> Pair(part.content as? String, null)
+            part.isMimeType("text/html") -> Pair(null, part.content as? String)
             part.isMimeType("multipart/*") -> {
                 val mp = part.content as Multipart
                 var plain: String? = null
@@ -319,15 +329,39 @@ object ImapConnector {
                         bodyPart.isMimeType("text/html") && html == null ->
                             html = bodyPart.content as? String
                         bodyPart.isMimeType("multipart/*") -> {
-                            val nested = extractText(bodyPart)
-                            if (nested.isNotBlank() && plain == null) plain = nested
+                            val (nestedPlain, nestedHtml) = extractParts(bodyPart)
+                            if (plain == null) plain = nestedPlain
+                            if (html == null) html = nestedHtml
                         }
                     }
                 }
-                plain ?: html?.let { stripHtml(it) } ?: ""
+                Pair(plain, html)
             }
-            else -> ""
+            else -> Pair(null, null)
         }
+    }
+
+    private fun wrapHtml(innerHtml: String): String {
+        return """
+            <html>
+            <head>
+                <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                <style>
+                    body { font-family: sans-serif; font-size: 15px; color: #000000; padding: 4px; word-wrap: break-word; }
+                    img { max-width: 100%; height: auto; }
+                    a { color: #1a73e8; }
+                </style>
+            </head>
+            <body>$innerHtml</body>
+            </html>
+        """.trimIndent()
+    }
+
+    private fun escapeHtml(text: String): String {
+        return text
+            .replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
     }
 
     private fun stripHtml(html: String): String {
