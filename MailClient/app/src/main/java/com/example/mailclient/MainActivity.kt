@@ -1,9 +1,11 @@
 package com.example.mailclient
 
 import android.os.Bundle
+import android.webkit.WebView
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -13,7 +15,10 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AccountCircle
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.BrightnessAuto
+import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.LightMode
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.*
@@ -25,17 +30,14 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
-import kotlinx.coroutines.launch
-import android.webkit.WebView
 import androidx.compose.ui.viewinterop.AndroidView
+import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {
-            MaterialTheme {
-                AppRoot()
-            }
+            AppRoot()
         }
     }
 }
@@ -74,7 +76,15 @@ fun AppRoot() {
     var updateInfo by remember { mutableStateOf<UpdateChecker.ReleaseInfo?>(null) }
     var showUpdateDialog by remember { mutableStateOf(false) }
     var isDownloading by remember { mutableStateOf(false) }
+    var themeMode by remember { mutableStateOf(ThemeStore.getThemeMode(context)) }
     val scope = rememberCoroutineScope()
+
+    val useDarkTheme = when (themeMode) {
+        ThemeStore.ThemeMode.LIGHT -> false
+        ThemeStore.ThemeMode.DARK -> true
+        ThemeStore.ThemeMode.SYSTEM -> isSystemInDarkTheme()
+    }
+    val colorScheme = if (useDarkTheme) darkColorScheme() else lightColorScheme()
 
     fun applyAccount(preset: ImapConnector.ServerPreset, e: String, pass: String) {
         host = preset.host; port = preset.port
@@ -118,156 +128,163 @@ fun AppRoot() {
         }
     }
 
-    when (val current = screen) {
-        is Screen.CheckingSavedLogin -> Box(
-            modifier = Modifier.fillMaxSize(),
-            contentAlignment = Alignment.Center
-        ) {
-            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                CircularProgressIndicator()
-                Spacer(modifier = Modifier.height(8.dp))
-                Text("Проверка сохранённого входа...")
+    MaterialTheme(colorScheme = colorScheme) {
+        when (val current = screen) {
+            is Screen.CheckingSavedLogin -> Box(
+                modifier = Modifier.fillMaxSize(),
+                contentAlignment = Alignment.Center
+            ) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    CircularProgressIndicator()
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text("Проверка сохранённого входа...")
+                }
             }
-        }
-        is Screen.Login -> LoginScreen(
-            initialError = savedLoginError,
-            showBack = current.showBack,
-            onBack = { screen = Screen.AccountList },
-            onLoginSuccess = { preset, e, pass ->
-                CredentialStore.addOrUpdateAccount(context, preset.label, e, pass)
-                applyAccount(preset, e, pass)
-                screen = Screen.Mailbox
-            }
-        )
-        is Screen.Mailbox -> MailboxScreen(
-            host = host, port = port, email = email, password = password,
-            folderName = currentFolder,
-            reloadKey = mailboxReloadKey,
-            onOpenAccounts = { accountListError = ""; screen = Screen.AccountList },
-            onOpenMessage = { header -> screen = Screen.MessageView(header) },
-            onOpenFolders = { screen = Screen.FolderList },
-            onCompose = { screen = Screen.Compose() }
-        )
-        is Screen.MessageView -> MessageScreen(
-            host = host, port = port, email = email, password = password,
-            header = current.header,
-            folderName = currentFolder,
-            onBack = { screen = Screen.Mailbox },
-            onActionDone = {
-                mailboxReloadKey++
-                screen = Screen.Mailbox
-            },
-            onReplyOrForward = { prefill -> screen = Screen.Compose(prefill) }
-        )
-        is Screen.FolderList -> FolderListScreen(
-            host = host, port = port, email = email, password = password,
-            onSelectFolder = { folder ->
-                currentFolder = folder
-                mailboxReloadKey++
-                screen = Screen.Mailbox
-            },
-            onBack = { screen = Screen.Mailbox }
-        )
-        is Screen.Compose -> ComposeScreen(
-            smtpHost = smtpHost, smtpPort = smtpPort,
-            fromEmail = email, password = password,
-            prefill = current.prefill,
-            onBack = { screen = Screen.Mailbox },
-            onSent = { screen = Screen.Mailbox }
-        )
-        is Screen.AccountList -> AccountListScreen(
-            accounts = CredentialStore.loadAccounts(context),
-            activeEmail = email,
-            errorText = accountListError,
-            isBusy = isSwitchingAccount,
-            onSelectAccount = { account ->
-                if (!account.email.equals(email, ignoreCase = true)) {
-                    isSwitchingAccount = true
-                    accountListError = ""
-                    scope.launch {
-                        val preset = ImapConnector.presets.firstOrNull { it.label == account.presetLabel }
-                            ?: ImapConnector.presets[0]
-                        val result = ImapConnector.fetchMessages(
-                            host = preset.host, port = preset.port,
-                            email = account.email, password = account.password, offset = 0
-                        )
-                        isSwitchingAccount = false
-                        result.fold(
-                            onSuccess = {
-                                CredentialStore.setActiveEmail(context, account.email)
-                                applyAccount(preset, account.email, account.password)
-                                screen = Screen.Mailbox
-                            },
-                            onFailure = {
-                                accountListError = "Не удалось войти в ${account.email}: ${it.message}"
-                            }
-                        )
-                    }
-                } else {
+            is Screen.Login -> LoginScreen(
+                initialError = savedLoginError,
+                showBack = current.showBack,
+                onBack = { screen = Screen.AccountList },
+                onLoginSuccess = { preset, e, pass ->
+                    CredentialStore.addOrUpdateAccount(context, preset.label, e, pass)
+                    applyAccount(preset, e, pass)
                     screen = Screen.Mailbox
                 }
-            },
-            onAddAccount = { screen = Screen.Login(showBack = true) },
-            onRemoveAccount = { account ->
-                CredentialStore.removeAccount(context, account.email)
-                if (account.email.equals(email, ignoreCase = true)) {
-                    val next = CredentialStore.getActiveAccount(context)
-                    if (next == null) {
-                        email = ""
-                        screen = Screen.Login()
-                    } else {
+            )
+            is Screen.Mailbox -> MailboxScreen(
+                host = host, port = port, email = email, password = password,
+                folderName = currentFolder,
+                reloadKey = mailboxReloadKey,
+                themeMode = themeMode,
+                onToggleTheme = {
+                    themeMode = ThemeStore.nextMode(themeMode)
+                    ThemeStore.setThemeMode(context, themeMode)
+                },
+                onOpenAccounts = { accountListError = ""; screen = Screen.AccountList },
+                onOpenMessage = { header -> screen = Screen.MessageView(header) },
+                onOpenFolders = { screen = Screen.FolderList },
+                onCompose = { screen = Screen.Compose() }
+            )
+            is Screen.MessageView -> MessageScreen(
+                host = host, port = port, email = email, password = password,
+                header = current.header,
+                folderName = currentFolder,
+                onBack = { screen = Screen.Mailbox },
+                onActionDone = {
+                    mailboxReloadKey++
+                    screen = Screen.Mailbox
+                },
+                onReplyOrForward = { prefill -> screen = Screen.Compose(prefill) }
+            )
+            is Screen.FolderList -> FolderListScreen(
+                host = host, port = port, email = email, password = password,
+                onSelectFolder = { folder ->
+                    currentFolder = folder
+                    mailboxReloadKey++
+                    screen = Screen.Mailbox
+                },
+                onBack = { screen = Screen.Mailbox }
+            )
+            is Screen.Compose -> ComposeScreen(
+                smtpHost = smtpHost, smtpPort = smtpPort,
+                fromEmail = email, password = password,
+                prefill = current.prefill,
+                onBack = { screen = Screen.Mailbox },
+                onSent = { screen = Screen.Mailbox }
+            )
+            is Screen.AccountList -> AccountListScreen(
+                accounts = CredentialStore.loadAccounts(context),
+                activeEmail = email,
+                errorText = accountListError,
+                isBusy = isSwitchingAccount,
+                onSelectAccount = { account ->
+                    if (!account.email.equals(email, ignoreCase = true)) {
                         isSwitchingAccount = true
+                        accountListError = ""
                         scope.launch {
-                            val preset = ImapConnector.presets.firstOrNull { it.label == next.presetLabel }
+                            val preset = ImapConnector.presets.firstOrNull { it.label == account.presetLabel }
                                 ?: ImapConnector.presets[0]
                             val result = ImapConnector.fetchMessages(
                                 host = preset.host, port = preset.port,
-                                email = next.email, password = next.password, offset = 0
+                                email = account.email, password = account.password, offset = 0
                             )
                             isSwitchingAccount = false
                             result.fold(
-                                onSuccess = { applyAccount(preset, next.email, next.password) },
-                                onFailure = { accountListError = "Не удалось войти в ${next.email}: ${it.message}" }
+                                onSuccess = {
+                                    CredentialStore.setActiveEmail(context, account.email)
+                                    applyAccount(preset, account.email, account.password)
+                                    screen = Screen.Mailbox
+                                },
+                                onFailure = {
+                                    accountListError = "Не удалось войти в ${account.email}: ${it.message}"
+                                }
                             )
                         }
+                    } else {
+                        screen = Screen.Mailbox
                     }
-                }
-            },
-            onBack = { screen = Screen.Mailbox }
-        )
-    }
+                },
+                onAddAccount = { screen = Screen.Login(showBack = true) },
+                onRemoveAccount = { account ->
+                    CredentialStore.removeAccount(context, account.email)
+                    if (account.email.equals(email, ignoreCase = true)) {
+                        val next = CredentialStore.getActiveAccount(context)
+                        if (next == null) {
+                            email = ""
+                            screen = Screen.Login()
+                        } else {
+                            isSwitchingAccount = true
+                            scope.launch {
+                                val preset = ImapConnector.presets.firstOrNull { it.label == next.presetLabel }
+                                    ?: ImapConnector.presets[0]
+                                val result = ImapConnector.fetchMessages(
+                                    host = preset.host, port = preset.port,
+                                    email = next.email, password = next.password, offset = 0
+                                )
+                                isSwitchingAccount = false
+                                result.fold(
+                                    onSuccess = { applyAccount(preset, next.email, next.password) },
+                                    onFailure = { accountListError = "Не удалось войти в ${next.email}: ${it.message}" }
+                                )
+                            }
+                        }
+                    }
+                },
+                onBack = { screen = Screen.Mailbox }
+            )
+        }
 
-    if (showUpdateDialog && updateInfo != null) {
-        val info = updateInfo!!
-        AlertDialog(
-            onDismissRequest = { if (!isDownloading) showUpdateDialog = false },
-            title = { Text("Доступно обновление ${info.version}") },
-            text = {
-                Column {
-                    if (info.notes.isNotBlank()) {
-                        Text(info.notes)
-                        Spacer(modifier = Modifier.height(8.dp))
+        if (showUpdateDialog && updateInfo != null) {
+            val info = updateInfo!!
+            AlertDialog(
+                onDismissRequest = { if (!isDownloading) showUpdateDialog = false },
+                title = { Text("Доступно обновление ${info.version}") },
+                text = {
+                    Column {
+                        if (info.notes.isNotBlank()) {
+                            Text(info.notes)
+                            Spacer(modifier = Modifier.height(8.dp))
+                        }
+                        if (isDownloading) {
+                            Text("Скачивание запущено, следите за уведомлением...")
+                        }
                     }
-                    if (isDownloading) {
-                        Text("Скачивание запущено, следите за уведомлением...")
+                },
+                confirmButton = {
+                    TextButton(
+                        onClick = {
+                            isDownloading = true
+                            UpdateChecker.downloadAndInstall(context, info.downloadUrl) {}
+                        },
+                        enabled = !isDownloading
+                    ) { Text("Скачать и установить") }
+                },
+                dismissButton = {
+                    TextButton(onClick = { showUpdateDialog = false }, enabled = !isDownloading) {
+                        Text("Позже")
                     }
                 }
-            },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        isDownloading = true
-                        UpdateChecker.downloadAndInstall(context, info.downloadUrl) {}
-                    },
-                    enabled = !isDownloading
-                ) { Text("Скачать и установить") }
-            },
-            dismissButton = {
-                TextButton(onClick = { showUpdateDialog = false }, enabled = !isDownloading) {
-                    Text("Позже")
-                }
-            }
-        )
+            )
+        }
     }
 }
 
@@ -481,6 +498,8 @@ fun MailboxScreen(
     password: String,
     folderName: String,
     reloadKey: Int,
+    themeMode: ThemeStore.ThemeMode,
+    onToggleTheme: () -> Unit,
     onOpenAccounts: () -> Unit,
     onOpenMessage: (ImapConnector.MailHeader) -> Unit,
     onOpenFolders: () -> Unit,
@@ -518,6 +537,17 @@ fun MailboxScreen(
         loadPage(0)
     }
 
+    val themeIcon = when (themeMode) {
+        ThemeStore.ThemeMode.SYSTEM -> Icons.Filled.BrightnessAuto
+        ThemeStore.ThemeMode.LIGHT -> Icons.Filled.LightMode
+        ThemeStore.ThemeMode.DARK -> Icons.Filled.DarkMode
+    }
+    val themeDescription = when (themeMode) {
+        ThemeStore.ThemeMode.SYSTEM -> "Тема: системная"
+        ThemeStore.ThemeMode.LIGHT -> "Тема: светлая"
+        ThemeStore.ThemeMode.DARK -> "Тема: тёмная"
+    }
+
     Scaffold(
         floatingActionButton = {
             FloatingActionButton(onClick = onCompose) {
@@ -537,8 +567,13 @@ fun MailboxScreen(
                         Text("Папка: ${ImapConnector.displayNameFor(folderName)} ▾")
                     }
                 }
-                IconButton(onClick = onOpenAccounts) {
-                    Icon(Icons.Filled.AccountCircle, contentDescription = "Аккаунты")
+                Row {
+                    IconButton(onClick = onToggleTheme) {
+                        Icon(themeIcon, contentDescription = themeDescription)
+                    }
+                    IconButton(onClick = onOpenAccounts) {
+                        Icon(Icons.Filled.AccountCircle, contentDescription = "Аккаунты")
+                    }
                 }
             }
 

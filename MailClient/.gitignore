@@ -1,15 +1,28 @@
-*.iml
-.gradle
-/local.properties
-/.idea/caches
-/.idea/libraries
-/.idea/modules.xml
-/.idea/workspace.xml
-/.idea/navEditor.xml
-/.idea/assetWizardSettings.xml
-.DS_Store
-/build
-/captures
-.externalNativeBuild
-.cxx
+# Байткод и артефакты сборки
+*.class
+build/
+*/build/
+.gradle/
+out/
+
+# Локальные настройки, специфичные для конкретного компьютера
 local.properties
+
+# Файлы Android Studio / IntelliJ
+.idea/
+*.iml
+.DS_Store
+
+# Файлы подписи — НИКОГДА не должны попадать в репозиторий
+*.jks
+*.keystore
+keystore.properties
+
+# Скомпилированные APK/AAB, если случайно оказались внутри проекта
+*.apk
+*.aab
+
+# Кэш и временные файлы
+captures/
+.externalNativeBuild/
+.cxx/
