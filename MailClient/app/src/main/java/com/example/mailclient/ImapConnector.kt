@@ -10,6 +10,7 @@ import javax.mail.Multipart
 import javax.mail.Part
 import javax.mail.Session
 import javax.mail.Store
+import android.util.Base64
 
 object ImapConnector {
 
@@ -73,6 +74,44 @@ object ImapConnector {
         return match?.groupValues?.get(1) ?: from.trim()
     }
 
+    private val encodedWordRegex = Regex("=\\?([^?]+)\\?([bBqQ])\\?([^?]*)\\?=")
+
+    fun decodeMimeWords(text: String): String {
+        return try {
+            encodedWordRegex.replace(text) { match ->
+                val charsetName = match.groupValues[1]
+                val encoding = match.groupValues[2].uppercase()
+                val content = match.groupValues[3]
+                val charset = try {
+                    java.nio.charset.Charset.forName(charsetName)
+                } catch (e: Exception) {
+                    Charsets.UTF_8
+                }
+                val decodedBytes = if (encoding == "B") {
+                    Base64.decode(content, Base64.DEFAULT)
+                } else {
+                    val out = java.io.ByteArrayOutputStream()
+                    var i = 0
+                    while (i < content.length) {
+                        when (val c = content[i]) {
+                            '_' -> { out.write(' '.code); i++ }
+                            '=' -> {
+                                val hex = content.substring(i + 1, i + 3)
+                                out.write(hex.toInt(16))
+                                i += 3
+                            }
+                            else -> { out.write(c.code); i++ }
+                        }
+                    }
+                    out.toByteArray()
+                }
+                String(decodedBytes, charset)
+            }
+        } catch (e: Exception) {
+            text
+        }
+    }
+
     private fun openStore(host: String, port: Int, email: String, password: String): Store {
         val props = Properties().apply {
             put("mail.store.protocol", "imaps")
@@ -122,8 +161,8 @@ object ImapConnector {
             val headers = rawMessages.map { msg ->
                 MailHeader(
                     msgNum = msg.messageNumber,
-                    subject = msg.subject ?: "(без темы)",
-                    from = msg.from?.joinToString(", ") { it.toString() } ?: "(неизвестно)",
+                    subject = decodeMimeWords(msg.subject ?: "(без темы)"),
+                    from = decodeMimeWords(msg.from?.joinToString(", ") { it.toString() } ?: "(неизвестно)"),
                     date = msg.sentDate?.toString() ?: ""
                 )
             }.reversed()
@@ -347,8 +386,18 @@ object ImapConnector {
             <head>
                 <meta name="viewport" content="width=device-width, initial-scale=1.0">
                 <style>
-                    body { font-family: sans-serif; font-size: 15px; color: #000000; padding: 4px; word-wrap: break-word; }
-                    img { max-width: 100%; height: auto; }
+                    body { font-family: sans-serif; font-size: 15px; color: #000000; padding: 4px; word-wrap: break-word; max-width: 100%; overflow-x: hidden; }
+                    body * {
+                        max-width: 100% !important;
+                        box-sizing: border-box !important;
+                    }
+                    table, tbody, thead, tr, td, th {
+                        display: inline !important;
+                    }
+                    td, th {
+                        padding: 0 2px !important;
+                    }
+                    img { height: auto !important; max-width: 100% !important; }
                     a { color: #1a73e8; }
                 </style>
             </head>

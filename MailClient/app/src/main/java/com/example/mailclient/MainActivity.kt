@@ -4,12 +4,15 @@ import android.os.Bundle
 import android.webkit.WebView
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AccountCircle
@@ -18,6 +21,8 @@ import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.BrightnessAuto
 import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.KeyboardArrowLeft
+import androidx.compose.material.icons.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.LightMode
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
@@ -25,6 +30,8 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -56,6 +63,23 @@ sealed class Screen {
     object FolderList : Screen()
     data class Compose(val prefill: ComposePrefill = ComposePrefill()) : Screen()
     object AccountList : Screen()
+}
+
+private val avatarPalette = listOf(
+    Color(0xFFE57373), Color(0xFF64B5F6), Color(0xFF81C784),
+    Color(0xFFFFB74D), Color(0xFFBA68C8), Color(0xFF4DB6AC),
+    Color(0xFFF06292), Color(0xFF9575CD)
+)
+
+private fun avatarColorFor(text: String): Color {
+    val index = (text.hashCode().let { if (it < 0) -it else it }) % avatarPalette.size
+    return avatarPalette[index]
+}
+
+private fun avatarLetterFor(text: String): String {
+    val nameOnly = text.substringBefore("<").trim()
+    val source = nameOnly.ifBlank { text }
+    return source.firstOrNull()?.uppercase() ?: "?"
 }
 
 @Composable
@@ -129,161 +153,163 @@ fun AppRoot() {
     }
 
     MaterialTheme(colorScheme = colorScheme) {
-        when (val current = screen) {
-            is Screen.CheckingSavedLogin -> Box(
-                modifier = Modifier.fillMaxSize(),
-                contentAlignment = Alignment.Center
-            ) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    CircularProgressIndicator()
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Text("Проверка сохранённого входа...")
+        Surface(color = MaterialTheme.colorScheme.background) {
+            when (val current = screen) {
+                is Screen.CheckingSavedLogin -> Box(
+                    modifier = Modifier.fillMaxSize(),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        CircularProgressIndicator()
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text("Проверка сохранённого входа...")
+                    }
                 }
-            }
-            is Screen.Login -> LoginScreen(
-                initialError = savedLoginError,
-                showBack = current.showBack,
-                onBack = { screen = Screen.AccountList },
-                onLoginSuccess = { preset, e, pass ->
-                    CredentialStore.addOrUpdateAccount(context, preset.label, e, pass)
-                    applyAccount(preset, e, pass)
-                    screen = Screen.Mailbox
-                }
-            )
-            is Screen.Mailbox -> MailboxScreen(
-                host = host, port = port, email = email, password = password,
-                folderName = currentFolder,
-                reloadKey = mailboxReloadKey,
-                themeMode = themeMode,
-                onToggleTheme = {
-                    themeMode = ThemeStore.nextMode(themeMode)
-                    ThemeStore.setThemeMode(context, themeMode)
-                },
-                onOpenAccounts = { accountListError = ""; screen = Screen.AccountList },
-                onOpenMessage = { header -> screen = Screen.MessageView(header) },
-                onOpenFolders = { screen = Screen.FolderList },
-                onCompose = { screen = Screen.Compose() }
-            )
-            is Screen.MessageView -> MessageScreen(
-                host = host, port = port, email = email, password = password,
-                header = current.header,
-                folderName = currentFolder,
-                onBack = { screen = Screen.Mailbox },
-                onActionDone = {
-                    mailboxReloadKey++
-                    screen = Screen.Mailbox
-                },
-                onReplyOrForward = { prefill -> screen = Screen.Compose(prefill) }
-            )
-            is Screen.FolderList -> FolderListScreen(
-                host = host, port = port, email = email, password = password,
-                onSelectFolder = { folder ->
-                    currentFolder = folder
-                    mailboxReloadKey++
-                    screen = Screen.Mailbox
-                },
-                onBack = { screen = Screen.Mailbox }
-            )
-            is Screen.Compose -> ComposeScreen(
-                smtpHost = smtpHost, smtpPort = smtpPort,
-                fromEmail = email, password = password,
-                prefill = current.prefill,
-                onBack = { screen = Screen.Mailbox },
-                onSent = { screen = Screen.Mailbox }
-            )
-            is Screen.AccountList -> AccountListScreen(
-                accounts = CredentialStore.loadAccounts(context),
-                activeEmail = email,
-                errorText = accountListError,
-                isBusy = isSwitchingAccount,
-                onSelectAccount = { account ->
-                    if (!account.email.equals(email, ignoreCase = true)) {
-                        isSwitchingAccount = true
-                        accountListError = ""
-                        scope.launch {
-                            val preset = ImapConnector.presets.firstOrNull { it.label == account.presetLabel }
-                                ?: ImapConnector.presets[0]
-                            val result = ImapConnector.fetchMessages(
-                                host = preset.host, port = preset.port,
-                                email = account.email, password = account.password, offset = 0
-                            )
-                            isSwitchingAccount = false
-                            result.fold(
-                                onSuccess = {
-                                    CredentialStore.setActiveEmail(context, account.email)
-                                    applyAccount(preset, account.email, account.password)
-                                    screen = Screen.Mailbox
-                                },
-                                onFailure = {
-                                    accountListError = "Не удалось войти в ${account.email}: ${it.message}"
-                                }
-                            )
-                        }
-                    } else {
+                is Screen.Login -> LoginScreen(
+                    initialError = savedLoginError,
+                    showBack = current.showBack,
+                    onBack = { screen = Screen.AccountList },
+                    onLoginSuccess = { preset, e, pass ->
+                        CredentialStore.addOrUpdateAccount(context, preset.label, e, pass)
+                        applyAccount(preset, e, pass)
                         screen = Screen.Mailbox
                     }
-                },
-                onAddAccount = { screen = Screen.Login(showBack = true) },
-                onRemoveAccount = { account ->
-                    CredentialStore.removeAccount(context, account.email)
-                    if (account.email.equals(email, ignoreCase = true)) {
-                        val next = CredentialStore.getActiveAccount(context)
-                        if (next == null) {
-                            email = ""
-                            screen = Screen.Login()
-                        } else {
+                )
+                is Screen.Mailbox -> MailboxScreen(
+                    host = host, port = port, email = email, password = password,
+                    folderName = currentFolder,
+                    reloadKey = mailboxReloadKey,
+                    themeMode = themeMode,
+                    onToggleTheme = {
+                        themeMode = ThemeStore.nextMode(themeMode)
+                        ThemeStore.setThemeMode(context, themeMode)
+                    },
+                    onOpenAccounts = { accountListError = ""; screen = Screen.AccountList },
+                    onOpenMessage = { header -> screen = Screen.MessageView(header) },
+                    onOpenFolders = { screen = Screen.FolderList },
+                    onCompose = { screen = Screen.Compose() }
+                )
+                is Screen.MessageView -> MessageScreen(
+                    host = host, port = port, email = email, password = password,
+                    header = current.header,
+                    folderName = currentFolder,
+                    onBack = { screen = Screen.Mailbox },
+                    onActionDone = {
+                        mailboxReloadKey++
+                        screen = Screen.Mailbox
+                    },
+                    onReplyOrForward = { prefill -> screen = Screen.Compose(prefill) }
+                )
+                is Screen.FolderList -> FolderListScreen(
+                    host = host, port = port, email = email, password = password,
+                    onSelectFolder = { folder ->
+                        currentFolder = folder
+                        mailboxReloadKey++
+                        screen = Screen.Mailbox
+                    },
+                    onBack = { screen = Screen.Mailbox }
+                )
+                is Screen.Compose -> ComposeScreen(
+                    smtpHost = smtpHost, smtpPort = smtpPort,
+                    fromEmail = email, password = password,
+                    prefill = current.prefill,
+                    onBack = { screen = Screen.Mailbox },
+                    onSent = { screen = Screen.Mailbox }
+                )
+                is Screen.AccountList -> AccountListScreen(
+                    accounts = CredentialStore.loadAccounts(context),
+                    activeEmail = email,
+                    errorText = accountListError,
+                    isBusy = isSwitchingAccount,
+                    onSelectAccount = { account ->
+                        if (!account.email.equals(email, ignoreCase = true)) {
                             isSwitchingAccount = true
+                            accountListError = ""
                             scope.launch {
-                                val preset = ImapConnector.presets.firstOrNull { it.label == next.presetLabel }
+                                val preset = ImapConnector.presets.firstOrNull { it.label == account.presetLabel }
                                     ?: ImapConnector.presets[0]
                                 val result = ImapConnector.fetchMessages(
                                     host = preset.host, port = preset.port,
-                                    email = next.email, password = next.password, offset = 0
+                                    email = account.email, password = account.password, offset = 0
                                 )
                                 isSwitchingAccount = false
                                 result.fold(
-                                    onSuccess = { applyAccount(preset, next.email, next.password) },
-                                    onFailure = { accountListError = "Не удалось войти в ${next.email}: ${it.message}" }
+                                    onSuccess = {
+                                        CredentialStore.setActiveEmail(context, account.email)
+                                        applyAccount(preset, account.email, account.password)
+                                        screen = Screen.Mailbox
+                                    },
+                                    onFailure = {
+                                        accountListError = "Не удалось войти в ${account.email}: ${it.message}"
+                                    }
                                 )
                             }
+                        } else {
+                            screen = Screen.Mailbox
                         }
-                    }
-                },
-                onBack = { screen = Screen.Mailbox }
-            )
-        }
+                    },
+                    onAddAccount = { screen = Screen.Login(showBack = true) },
+                    onRemoveAccount = { account ->
+                        CredentialStore.removeAccount(context, account.email)
+                        if (account.email.equals(email, ignoreCase = true)) {
+                            val next = CredentialStore.getActiveAccount(context)
+                            if (next == null) {
+                                email = ""
+                                screen = Screen.Login()
+                            } else {
+                                isSwitchingAccount = true
+                                scope.launch {
+                                    val preset = ImapConnector.presets.firstOrNull { it.label == next.presetLabel }
+                                        ?: ImapConnector.presets[0]
+                                    val result = ImapConnector.fetchMessages(
+                                        host = preset.host, port = preset.port,
+                                        email = next.email, password = next.password, offset = 0
+                                    )
+                                    isSwitchingAccount = false
+                                    result.fold(
+                                        onSuccess = { applyAccount(preset, next.email, next.password) },
+                                        onFailure = { accountListError = "Не удалось войти в ${next.email}: ${it.message}" }
+                                    )
+                                }
+                            }
+                        }
+                    },
+                    onBack = { screen = Screen.Mailbox }
+                )
+            }
 
-        if (showUpdateDialog && updateInfo != null) {
-            val info = updateInfo!!
-            AlertDialog(
-                onDismissRequest = { if (!isDownloading) showUpdateDialog = false },
-                title = { Text("Доступно обновление ${info.version}") },
-                text = {
-                    Column {
-                        if (info.notes.isNotBlank()) {
-                            Text(info.notes)
-                            Spacer(modifier = Modifier.height(8.dp))
+            if (showUpdateDialog && updateInfo != null) {
+                val info = updateInfo!!
+                AlertDialog(
+                    onDismissRequest = { if (!isDownloading) showUpdateDialog = false },
+                    title = { Text("Доступно обновление ${info.version}") },
+                    text = {
+                        Column {
+                            if (info.notes.isNotBlank()) {
+                                Text(info.notes)
+                                Spacer(modifier = Modifier.height(8.dp))
+                            }
+                            if (isDownloading) {
+                                Text("Скачивание запущено, следите за уведомлением...")
+                            }
                         }
-                        if (isDownloading) {
-                            Text("Скачивание запущено, следите за уведомлением...")
+                    },
+                    confirmButton = {
+                        TextButton(
+                            onClick = {
+                                isDownloading = true
+                                UpdateChecker.downloadAndInstall(context, info.downloadUrl) {}
+                            },
+                            enabled = !isDownloading
+                        ) { Text("Скачать и установить") }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = { showUpdateDialog = false }, enabled = !isDownloading) {
+                            Text("Позже")
                         }
                     }
-                },
-                confirmButton = {
-                    TextButton(
-                        onClick = {
-                            isDownloading = true
-                            UpdateChecker.downloadAndInstall(context, info.downloadUrl) {}
-                        },
-                        enabled = !isDownloading
-                    ) { Text("Скачать и установить") }
-                },
-                dismissButton = {
-                    TextButton(onClick = { showUpdateDialog = false }, enabled = !isDownloading) {
-                        Text("Позже")
-                    }
-                }
-            )
+                )
+            }
         }
     }
 }
@@ -318,7 +344,7 @@ fun LoginScreen(
                     Icon(Icons.Filled.ArrowBack, contentDescription = "Назад")
                 }
             }
-            Text("Вход в почту", style = MaterialTheme.typography.titleLarge)
+            Text("Вход в почту", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
         }
 
         ExposedDropdownMenuBox(expanded = expanded, onExpandedChange = { expanded = it }) {
@@ -327,6 +353,7 @@ fun LoginScreen(
                 onValueChange = {},
                 readOnly = true,
                 label = { Text("Провайдер") },
+                shape = RoundedCornerShape(12.dp),
                 modifier = Modifier.menuAnchor().fillMaxWidth()
             )
             ExposedDropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
@@ -346,6 +373,7 @@ fun LoginScreen(
             value = email,
             onValueChange = { email = it },
             label = { Text("Email") },
+            shape = RoundedCornerShape(12.dp),
             modifier = Modifier.fillMaxWidth()
         )
 
@@ -354,6 +382,7 @@ fun LoginScreen(
             onValueChange = { password = it },
             label = { Text("Пароль (для Yandex/Mail.ru/Yahoo — пароль приложения)") },
             visualTransformation = if (passwordVisible) VisualTransformation.None else PasswordVisualTransformation(),
+            shape = RoundedCornerShape(12.dp),
             trailingIcon = {
                 IconButton(onClick = { passwordVisible = !passwordVisible }) {
                     Icon(
@@ -389,7 +418,8 @@ fun LoginScreen(
                 }
             },
             enabled = !isLoading,
-            modifier = Modifier.fillMaxWidth()
+            shape = RoundedCornerShape(12.dp),
+            modifier = Modifier.fillMaxWidth().height(48.dp)
         ) {
             Text(if (isLoading) "Подключение..." else "Войти")
         }
@@ -418,7 +448,7 @@ fun AccountListScreen(
             IconButton(onClick = onBack) {
                 Icon(Icons.Filled.ArrowBack, contentDescription = "Назад")
             }
-            Text("Аккаунты", style = MaterialTheme.typography.titleLarge)
+            Text("Аккаунты", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
         }
 
         if (isBusy) {
@@ -431,39 +461,60 @@ fun AccountListScreen(
             Text(errorText, color = MaterialTheme.colorScheme.error)
         }
 
-        LazyColumn(modifier = Modifier.weight(1f)) {
+        LazyColumn(
+            modifier = Modifier.weight(1f),
+            contentPadding = PaddingValues(vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
             items(accounts) { account ->
                 val isActive = account.email.equals(activeEmail, ignoreCase = true)
-                Row(
+                ElevatedCard(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .clickable(enabled = !isBusy) { onSelectAccount(account) }
-                        .padding(vertical = 12.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
+                        .clickable(enabled = !isBusy) { onSelectAccount(account) },
+                    shape = RoundedCornerShape(14.dp),
+                    colors = if (isActive)
+                        CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)
+                    else CardDefaults.elevatedCardColors()
                 ) {
-                    Column {
-                        Text(
-                            account.email,
-                            fontWeight = if (isActive) FontWeight.Bold else FontWeight.Normal
-                        )
-                        Text(
-                            if (isActive) "${account.presetLabel} · активен" else account.presetLabel,
-                            style = MaterialTheme.typography.bodySmall
-                        )
-                    }
-                    IconButton(onClick = { pendingDelete = account }, enabled = !isBusy) {
-                        Icon(Icons.Filled.Delete, contentDescription = "Удалить аккаунт")
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(14.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(40.dp)
+                                .clip(CircleShape)
+                                .background(avatarColorFor(account.email)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(avatarLetterFor(account.email), color = Color.White, fontWeight = FontWeight.Bold)
+                        }
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                account.email,
+                                fontWeight = if (isActive) FontWeight.Bold else FontWeight.Normal
+                            )
+                            Text(
+                                if (isActive) "${account.presetLabel} · активен" else account.presetLabel,
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                        }
+                        IconButton(onClick = { pendingDelete = account }, enabled = !isBusy) {
+                            Icon(Icons.Filled.Delete, contentDescription = "Удалить аккаунт")
+                        }
                     }
                 }
-                Divider()
             }
         }
 
         Button(
             onClick = onAddAccount,
             enabled = !isBusy,
-            modifier = Modifier.fillMaxWidth().padding(top = 8.dp)
+            shape = RoundedCornerShape(12.dp),
+            modifier = Modifier.fillMaxWidth().height(48.dp).padding(top = 8.dp)
         ) {
             Icon(Icons.Filled.Add, contentDescription = null)
             Spacer(modifier = Modifier.width(4.dp))
@@ -490,6 +541,7 @@ fun AccountListScreen(
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MailboxScreen(
     host: String,
@@ -549,34 +601,36 @@ fun MailboxScreen(
     }
 
     Scaffold(
-        floatingActionButton = {
-            FloatingActionButton(onClick = onCompose) {
-                Icon(Icons.Filled.Add, contentDescription = "Написать письмо")
-            }
-        }
-    ) { innerPadding ->
-        Column(modifier = Modifier.fillMaxSize().padding(innerPadding).padding(16.dp)) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Column {
-                    Text(email, style = MaterialTheme.typography.titleMedium)
-                    TextButton(onClick = onOpenFolders, contentPadding = PaddingValues(0.dp)) {
-                        Text("Папка: ${ImapConnector.displayNameFor(folderName)} ▾")
+        topBar = {
+            TopAppBar(
+                title = {
+                    Column {
+                        Text(email, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                        TextButton(onClick = onOpenFolders, contentPadding = PaddingValues(0.dp)) {
+                            Text("${ImapConnector.displayNameFor(folderName)} ▾", style = MaterialTheme.typography.bodySmall)
+                        }
                     }
-                }
-                Row {
+                },
+                actions = {
                     IconButton(onClick = onToggleTheme) {
                         Icon(themeIcon, contentDescription = themeDescription)
                     }
                     IconButton(onClick = onOpenAccounts) {
                         Icon(Icons.Filled.AccountCircle, contentDescription = "Аккаунты")
                     }
-                }
+                },
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = MaterialTheme.colorScheme.surface
+                )
+            )
+        },
+        floatingActionButton = {
+            FloatingActionButton(onClick = onCompose) {
+                Icon(Icons.Filled.Add, contentDescription = "Написать письмо")
             }
-
+        }
+    ) { innerPadding ->
+        Column(modifier = Modifier.fillMaxSize().padding(innerPadding).padding(horizontal = 12.dp)) {
             if (isLoading) {
                 Box(
                     modifier = Modifier.fillMaxWidth().padding(16.dp),
@@ -587,46 +641,77 @@ fun MailboxScreen(
             }
 
             if (errorText.isNotEmpty()) {
-                Text(errorText, color = MaterialTheme.colorScheme.error)
+                Text(errorText, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(vertical = 8.dp))
             }
 
-            LazyColumn(modifier = Modifier.weight(1f)) {
+            LazyColumn(
+                modifier = Modifier.weight(1f),
+                contentPadding = PaddingValues(vertical = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
                 items(messages) { mail ->
-                    Column(
+                    ElevatedCard(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .clickable { onOpenMessage(mail) }
-                            .padding(vertical = 8.dp)
+                            .clickable { onOpenMessage(mail) },
+                        shape = RoundedCornerShape(14.dp)
                     ) {
-                        Text(mail.from, fontWeight = FontWeight.Bold)
-                        Text(mail.subject)
-                        Text(mail.date, style = MaterialTheme.typography.bodySmall)
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(12.dp),
+                            verticalAlignment = Alignment.Top
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(40.dp)
+                                    .clip(CircleShape)
+                                    .background(avatarColorFor(mail.from)),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(avatarLetterFor(mail.from), color = Color.White, fontWeight = FontWeight.Bold)
+                            }
+                            Spacer(modifier = Modifier.width(12.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(mail.from, fontWeight = FontWeight.Bold, maxLines = 1)
+                                Spacer(modifier = Modifier.height(2.dp))
+                                Text(mail.subject, maxLines = 2, style = MaterialTheme.typography.bodyMedium)
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Text(
+                                    mail.date,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
                     }
-                    Divider()
                 }
             }
 
             val currentEnd = offset + messages.size
             Text(
                 "Показаны ${if (messages.isEmpty()) 0 else offset + 1}–$currentEnd из $totalCount",
-                style = MaterialTheme.typography.bodySmall
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.padding(vertical = 4.dp)
             )
 
             Row(
-                modifier = Modifier.fillMaxWidth().padding(top = 8.dp, bottom = 72.dp),
+                modifier = Modifier.fillMaxWidth().padding(top = 4.dp, bottom = 72.dp),
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
-                Button(
+                OutlinedButton(
                     onClick = { loadPage(maxOf(0, offset - pageSize)) },
-                    enabled = !isLoading && offset > 0
+                    enabled = !isLoading && offset > 0,
+                    shape = RoundedCornerShape(12.dp)
                 ) {
-                    Text("← Назад")
+                    Icon(Icons.Filled.KeyboardArrowLeft, contentDescription = null)
+                    Text("Назад")
                 }
-                Button(
+                OutlinedButton(
                     onClick = { loadPage(offset + pageSize) },
-                    enabled = !isLoading && currentEnd < totalCount
+                    enabled = !isLoading && currentEnd < totalCount,
+                    shape = RoundedCornerShape(12.dp)
                 ) {
-                    Text("Вперёд →")
+                    Text("Вперёд")
+                    Icon(Icons.Filled.KeyboardArrowRight, contentDescription = null)
                 }
             }
         }
@@ -726,7 +811,7 @@ fun MessageScreen(
             IconButton(onClick = onBack) {
                 Icon(Icons.Filled.ArrowBack, contentDescription = "Назад")
             }
-            Text("Письмо", style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f))
+            Text("Письмо", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
         }
 
         Row(
@@ -826,6 +911,8 @@ fun MessageScreen(
                     settings.javaScriptEnabled = false
                     settings.loadsImagesAutomatically = true
                     settings.domStorageEnabled = false
+                    settings.useWideViewPort = true
+                    settings.loadWithOverviewMode = true
                 }
             },
             update = { webView ->
@@ -926,7 +1013,7 @@ fun FolderListScreen(
             IconButton(onClick = onBack) {
                 Icon(Icons.Filled.ArrowBack, contentDescription = "Назад")
             }
-            Text("Папки", style = MaterialTheme.typography.titleLarge)
+            Text("Папки", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
         }
 
         if (isLoading) {
@@ -939,16 +1026,20 @@ fun FolderListScreen(
             Text(errorText, color = MaterialTheme.colorScheme.error)
         }
 
-        LazyColumn {
+        LazyColumn(
+            contentPadding = PaddingValues(vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
             items(folders) { folder ->
-                Text(
-                    ImapConnector.displayNameFor(folder),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clickable { onSelectFolder(folder) }
-                        .padding(vertical = 12.dp)
-                )
-                Divider()
+                ElevatedCard(
+                    modifier = Modifier.fillMaxWidth().clickable { onSelectFolder(folder) },
+                    shape = RoundedCornerShape(12.dp)
+                ) {
+                    Text(
+                        ImapConnector.displayNameFor(folder),
+                        modifier = Modifier.fillMaxWidth().padding(14.dp)
+                    )
+                }
             }
         }
     }
@@ -980,7 +1071,7 @@ fun ComposeScreen(
             IconButton(onClick = onBack) {
                 Icon(Icons.Filled.ArrowBack, contentDescription = "Назад")
             }
-            Text("Новое письмо", style = MaterialTheme.typography.titleLarge)
+            Text("Новое письмо", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
         }
 
         Spacer(modifier = Modifier.height(8.dp))
@@ -989,6 +1080,7 @@ fun ComposeScreen(
             value = to,
             onValueChange = { to = it },
             label = { Text("Кому") },
+            shape = RoundedCornerShape(12.dp),
             modifier = Modifier.fillMaxWidth()
         )
 
@@ -998,6 +1090,7 @@ fun ComposeScreen(
             value = subject,
             onValueChange = { subject = it },
             label = { Text("Тема") },
+            shape = RoundedCornerShape(12.dp),
             modifier = Modifier.fillMaxWidth()
         )
 
@@ -1007,6 +1100,7 @@ fun ComposeScreen(
             value = body,
             onValueChange = { body = it },
             label = { Text("Текст письма") },
+            shape = RoundedCornerShape(12.dp),
             modifier = Modifier.fillMaxWidth().weight(1f)
         )
 
@@ -1032,7 +1126,8 @@ fun ComposeScreen(
                 }
             },
             enabled = !isSending && to.isNotBlank(),
-            modifier = Modifier.fillMaxWidth().padding(top = 8.dp)
+            shape = RoundedCornerShape(12.dp),
+            modifier = Modifier.fillMaxWidth().height(48.dp).padding(top = 8.dp)
         ) {
             Text(if (isSending) "Отправка..." else "Отправить")
         }
