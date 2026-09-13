@@ -39,6 +39,7 @@ import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import kotlinx.coroutines.launch
+import androidx.compose.foundation.horizontalScroll
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -623,11 +624,6 @@ fun MailboxScreen(
                     containerColor = MaterialTheme.colorScheme.surface
                 )
             )
-        },
-        floatingActionButton = {
-            FloatingActionButton(onClick = onCompose) {
-                Icon(Icons.Filled.Add, contentDescription = "Написать письмо")
-            }
         }
     ) { innerPadding ->
         Column(modifier = Modifier.fillMaxSize().padding(innerPadding).padding(horizontal = 12.dp)) {
@@ -694,8 +690,9 @@ fun MailboxScreen(
             )
 
             Row(
-                modifier = Modifier.fillMaxWidth().padding(top = 4.dp, bottom = 72.dp),
-                horizontalArrangement = Arrangement.SpaceBetween
+                modifier = Modifier.fillMaxWidth().padding(top = 4.dp, bottom = 12.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
             ) {
                 OutlinedButton(
                     onClick = { loadPage(maxOf(0, offset - pageSize)) },
@@ -704,6 +701,9 @@ fun MailboxScreen(
                 ) {
                     Icon(Icons.Filled.KeyboardArrowLeft, contentDescription = null)
                     Text("Назад")
+                }
+                FilledIconButton(onClick = onCompose, shape = RoundedCornerShape(12.dp)) {
+                    Icon(Icons.Filled.Add, contentDescription = "Написать письмо")
                 }
                 OutlinedButton(
                     onClick = { loadPage(offset + pageSize) },
@@ -815,7 +815,10 @@ fun MessageScreen(
         }
 
         Row(
-            modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState())
+                .padding(vertical = 4.dp),
             horizontalArrangement = Arrangement.spacedBy(4.dp)
         ) {
             TextButton(
@@ -845,12 +848,7 @@ fun MessageScreen(
                 },
                 enabled = !isBusy && !isLoading
             ) { Text("Переслать") }
-        }
 
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
-            horizontalArrangement = Arrangement.spacedBy(4.dp)
-        ) {
             if (ImapConnector.isTrashFolder(folderName)) {
                 TextButton(onClick = { showDeleteConfirm = true }, enabled = !isBusy) {
                     Text("Удалить насовсем", color = MaterialTheme.colorScheme.error)
