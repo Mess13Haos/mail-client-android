@@ -618,7 +618,6 @@ fun MailboxScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                modifier = Modifier.height(48.dp),
                 title = {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(
