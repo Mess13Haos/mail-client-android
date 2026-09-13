@@ -387,15 +387,30 @@ object ImapConnector {
                 <meta name="viewport" content="width=device-width, initial-scale=1.0">
                 <style>
                     body { font-family: sans-serif; font-size: 15px; color: #000000; padding: 4px; word-wrap: break-word; max-width: 100%; overflow-x: hidden; }
-                    body * {
+                                        body * {
                         max-width: 100% !important;
                         box-sizing: border-box !important;
+                        position: static !important;
+                        float: none !important;
+                        margin: 0 !important;
+                        height: auto !important;
+                        min-height: 0 !important;
+                        line-height: 1.4 !important;
+                        top: auto !important;
+                        left: auto !important;
+                        right: auto !important;
+                        bottom: auto !important;
+                        transform: none !important;
                     }
                     table, tbody, thead, tr, td, th {
                         display: inline !important;
                     }
                     td, th {
                         padding: 0 2px !important;
+                    }
+                    p, div {
+                        display: block !important;
+                        margin-bottom: 8px !important;
                     }
                     img { height: auto !important; max-width: 100% !important; }
                     a { color: #1a73e8; }

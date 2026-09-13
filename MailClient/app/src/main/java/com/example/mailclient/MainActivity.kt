@@ -40,6 +40,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import kotlinx.coroutines.launch
 import androidx.compose.foundation.horizontalScroll
+import androidx.activity.compose.BackHandler
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -150,6 +151,19 @@ fun AppRoot() {
                     screen = Screen.AccountList
                 }
             )
+        }
+    }
+
+
+
+    BackHandler(enabled = screen !is Screen.Mailbox && screen !is Screen.CheckingSavedLogin) {
+        when (val current = screen) {
+            is Screen.MessageView -> screen = Screen.Mailbox
+            is Screen.FolderList -> screen = Screen.Mailbox
+            is Screen.Compose -> screen = Screen.Mailbox
+            is Screen.AccountList -> screen = Screen.Mailbox
+            is Screen.Login -> if (current.showBack) screen = Screen.AccountList
+            else -> {}
         }
     }
 
@@ -604,11 +618,17 @@ fun MailboxScreen(
     Scaffold(
         topBar = {
             TopAppBar(
+                modifier = Modifier.height(48.dp),
                 title = {
-                    Column {
-                        Text(email, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-                        TextButton(onClick = onOpenFolders, contentPadding = PaddingValues(0.dp)) {
-                            Text("${ImapConnector.displayNameFor(folderName)} ▾", style = MaterialTheme.typography.bodySmall)
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            email,
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1
+                        )
+                        TextButton(onClick = onOpenFolders, contentPadding = PaddingValues(start = 4.dp)) {
+                            Text("· ${ImapConnector.displayNameFor(folderName)} ▾", style = MaterialTheme.typography.bodySmall)
                         }
                     }
                 },
@@ -721,6 +741,28 @@ fun MailboxScreen(
 private enum class PendingAction { NONE, DELETE, SPAM, MOVE, RESTORE }
 
 @Composable
+private fun CompactActionButton(
+    text: String,
+    onClick: () -> Unit,
+    enabled: Boolean = true,
+    isDestructive: Boolean = false
+) {
+    val color = when {
+        !enabled -> MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
+        isDestructive -> MaterialTheme.colorScheme.error
+        else -> MaterialTheme.colorScheme.primary
+    }
+    Text(
+        text = text,
+        color = color,
+        style = MaterialTheme.typography.labelLarge,
+        modifier = Modifier
+            .clip(RoundedCornerShape(8.dp))
+            .clickable(enabled = enabled, onClick = onClick)
+            .padding(horizontal = 10.dp, vertical = 6.dp)
+    )
+}
+@Composable
 fun MessageScreen(
     host: String,
     port: Int,
@@ -733,6 +775,7 @@ fun MessageScreen(
     onReplyOrForward: (ComposePrefill) -> Unit
 ) {
     var body by remember { mutableStateOf(ImapConnector.MailBody("", "")) }
+    var showPlainText by remember { mutableStateOf(false) }
     var isLoading by remember { mutableStateOf(true) }
     var errorText by remember { mutableStateOf("") }
     var showMoveDialog by remember { mutableStateOf(false) }
@@ -805,23 +848,28 @@ fun MessageScreen(
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .padding(16.dp)
+            .padding(horizontal = 16.dp, vertical = 4.dp)
     ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            IconButton(onClick = onBack) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.height(32.dp)
+        ) {
+            IconButton(onClick = onBack, modifier = Modifier.size(36.dp)) {
                 Icon(Icons.Filled.ArrowBack, contentDescription = "Назад")
             }
-            Text("Письмо", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+            Text("Письмо", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
         }
 
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .horizontalScroll(rememberScrollState())
-                .padding(vertical = 4.dp),
-            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                .horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(2.dp),
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            TextButton(
+            CompactActionButton(
+                text = "Ответить",
+                enabled = !isBusy && !isLoading,
                 onClick = {
                     onReplyOrForward(
                         ComposePrefill(
@@ -831,11 +879,12 @@ fun MessageScreen(
                             body = quotedOriginal()
                         )
                     )
-                },
-                enabled = !isBusy && !isLoading
-            ) { Text("Ответить") }
+                }
+            )
 
-            TextButton(
+            CompactActionButton(
+                text = "Переслать",
+                enabled = !isBusy && !isLoading,
                 onClick = {
                     onReplyOrForward(
                         ComposePrefill(
@@ -845,19 +894,25 @@ fun MessageScreen(
                             body = quotedOriginal()
                         )
                     )
-                },
-                enabled = !isBusy && !isLoading
-            ) { Text("Переслать") }
+                }
+            )
 
             if (ImapConnector.isTrashFolder(folderName)) {
-                TextButton(onClick = { showDeleteConfirm = true }, enabled = !isBusy) {
-                    Text("Удалить насовсем", color = MaterialTheme.colorScheme.error)
-                }
-                TextButton(onClick = { runRestore() }, enabled = !isBusy) {
-                    Text(if (pendingAction == PendingAction.RESTORE) "..." else "Восстановить")
-                }
+                CompactActionButton(
+                    text = "Удалить насовсем",
+                    enabled = !isBusy,
+                    isDestructive = true,
+                    onClick = { showDeleteConfirm = true }
+                )
+                CompactActionButton(
+                    text = if (pendingAction == PendingAction.RESTORE) "..." else "Восстановить",
+                    enabled = !isBusy,
+                    onClick = { runRestore() }
+                )
             } else {
-                TextButton(
+                CompactActionButton(
+                    text = "Переместить",
+                    enabled = !isBusy,
                     onClick = {
                         showMoveDialog = true
                         pendingAction = PendingAction.MOVE
@@ -869,29 +924,44 @@ fun MessageScreen(
                                 onFailure = { errorText = "Ошибка получения папок: ${it.message}" }
                             )
                         }
-                    },
-                    enabled = !isBusy
-                ) { Text("Переместить") }
+                    }
+                )
 
-                TextButton(onClick = { showDeleteConfirm = true }, enabled = !isBusy) {
-                    Text("Удалить", color = MaterialTheme.colorScheme.error)
-                }
+                CompactActionButton(
+                    text = "Удалить",
+                    enabled = !isBusy,
+                    isDestructive = true,
+                    onClick = { showDeleteConfirm = true }
+                )
 
                 if (!ImapConnector.isSpamFolder(folderName)) {
-                    TextButton(onClick = { runSpam() }, enabled = !isBusy) {
-                        Text(if (pendingAction == PendingAction.SPAM) "..." else "СПАМ")
-                    }
+                    CompactActionButton(
+                        text = if (pendingAction == PendingAction.SPAM) "..." else "СПАМ",
+                        enabled = !isBusy,
+                        onClick = { runSpam() }
+                    )
                 }
             }
+
+            CompactActionButton(
+                text = if (showPlainText) "Как HTML" else "Как текст",
+                enabled = !isLoading,
+                onClick = { showPlainText = !showPlainText }
+            )
         }
 
-        Spacer(modifier = Modifier.height(8.dp))
+        Spacer(modifier = Modifier.height(2.dp))
 
-        Text(header.subject, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-        Text("От: ${header.from}", style = MaterialTheme.typography.bodySmall)
-        Text(header.date, style = MaterialTheme.typography.bodySmall)
+        Text(header.subject, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, maxLines = 1)
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState())
+        ) {
+            Text("От: ${header.from} · ${header.date}", style = MaterialTheme.typography.bodySmall, maxLines = 1)
+        }
 
-        Divider(modifier = Modifier.padding(vertical = 12.dp))
+        Divider(modifier = Modifier.padding(vertical = 4.dp))
 
         if (isLoading || pendingAction != PendingAction.NONE) {
             Box(modifier = Modifier.fillMaxWidth().padding(16.dp), contentAlignment = Alignment.Center) {
@@ -903,21 +973,32 @@ fun MessageScreen(
             Text(errorText, color = MaterialTheme.colorScheme.error)
         }
 
-        AndroidView(
-            factory = { ctx ->
-                WebView(ctx).apply {
-                    settings.javaScriptEnabled = false
-                    settings.loadsImagesAutomatically = true
-                    settings.domStorageEnabled = false
-                    settings.useWideViewPort = true
-                    settings.loadWithOverviewMode = true
-                }
-            },
-            update = { webView ->
-                webView.loadDataWithBaseURL(null, body.displayHtml, "text/html", "UTF-8", null)
-            },
-            modifier = Modifier.fillMaxWidth().weight(1f)
-        )
+        if (showPlainText) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f)
+                    .verticalScroll(rememberScrollState())
+            ) {
+                Text(body.plainText)
+            }
+        } else {
+            AndroidView(
+                factory = { ctx ->
+                    WebView(ctx).apply {
+                        settings.javaScriptEnabled = false
+                        settings.loadsImagesAutomatically = true
+                        settings.domStorageEnabled = false
+                        settings.useWideViewPort = true
+                        settings.loadWithOverviewMode = true
+                    }
+                },
+                update = { webView ->
+                    webView.loadDataWithBaseURL(null, body.displayHtml, "text/html", "UTF-8", null)
+                },
+                modifier = Modifier.fillMaxWidth().weight(1f)
+            )
+        }
     }
 
     if (showDeleteConfirm) {
