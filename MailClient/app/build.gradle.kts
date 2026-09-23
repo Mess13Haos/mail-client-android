@@ -13,8 +13,8 @@ android {
         applicationId = "com.example.mailclient"
         minSdk = 24
         targetSdk = 37
-        versionCode = 5
-        versionName = "1.0.5"
+        versionCode = 6
+        versionName = "1.0.6"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -65,6 +65,7 @@ dependencies {
     implementation("androidx.compose.material:material-icons-extended:1.6.8")
     implementation("androidx.security:security-crypto:1.0.0")
     testImplementation(libs.junit)
+    implementation("androidx.work:work-runtime-ktx:2.9.0")
     androidTestImplementation(platform(libs.androidx.compose.bom))
     androidTestImplementation(libs.androidx.compose.ui.test.junit4)
     androidTestImplementation(libs.androidx.espresso.core)

@@ -11,7 +11,7 @@ object CredentialStore {
     private const val KEY_ACCOUNTS = "accounts_json"
     private const val KEY_ACTIVE_EMAIL = "active_email"
 
-    data class SavedAccount(val presetLabel: String, val email: String, val password: String)
+    data class SavedAccount(val presetLabel: String, val email: String, val password: String, val lastNotifiedUid: Long = 0L)
 
     private fun getPrefs(context: Context) = run {
         val masterKeyAlias = MasterKeys.getOrCreate(MasterKeys.AES256_GCM_SPEC)
@@ -35,7 +35,8 @@ object CredentialStore {
                 SavedAccount(
                     presetLabel = obj.getString("presetLabel"),
                     email = obj.getString("email"),
-                    password = obj.getString("password")
+                    password = obj.getString("password"),
+                    lastNotifiedUid = obj.optLong("lastNotifiedUid", 0L)
                 )
             )
         }
@@ -49,6 +50,7 @@ object CredentialStore {
             obj.put("presetLabel", acc.presetLabel)
             obj.put("email", acc.email)
             obj.put("password", acc.password)
+            obj.put("lastNotifiedUid", acc.lastNotifiedUid)
             array.put(obj)
         }
         getPrefs(context).edit().putString(KEY_ACCOUNTS, array.toString()).apply()
@@ -87,5 +89,12 @@ object CredentialStore {
         val activeEmail = getActiveEmail(context)
         if (activeEmail.isBlank()) return null
         return loadAccounts(context).firstOrNull { it.email.equals(activeEmail, ignoreCase = true) }
+    }
+
+    fun updateLastNotifiedUid(context: Context, email: String, uid: Long) {
+        val accounts = loadAccounts(context).map { acc ->
+            if (acc.email.equals(email, ignoreCase = true)) acc.copy(lastNotifiedUid = uid) else acc
+        }
+        saveAccounts(context, accounts)
     }
 }

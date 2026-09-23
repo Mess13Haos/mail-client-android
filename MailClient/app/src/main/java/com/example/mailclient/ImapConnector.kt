@@ -11,6 +11,7 @@ import javax.mail.Part
 import javax.mail.Session
 import javax.mail.Store
 import android.util.Base64
+import javax.mail.UIDFolder
 
 object ImapConnector {
 
@@ -21,6 +22,129 @@ object ImapConnector {
         val smtpHost: String,
         val smtpPort: Int
     )
+
+    data class NewMailInfo(val uid: Long, val from: String, val subject: String)
+
+    suspend fun fetchNewInboxMail(
+        host: String,
+        port: Int,
+        email: String,
+        password: String,
+        sinceUid: Long
+    ): Result<Pair<List<NewMailInfo>, Long>> = withContext(Dispatchers.IO) {
+        var store: Store? = null
+        var folder: Folder? = null
+        try {
+            store = openStore(host, port, email, password)
+            folder = store.getFolder("INBOX")
+            folder.open(Folder.READ_ONLY)
+            val uidFolder = folder as UIDFolder
+
+            val currentHighestUid = uidFolder.getUIDNext() - 1
+
+            if (sinceUid <= 0) {
+                return@withContext Result.success(Pair(emptyList(), currentHighestUid))
+            }
+            if (currentHighestUid <= sinceUid) {
+                return@withContext Result.success(Pair(emptyList(), sinceUid))
+            }
+
+            val newMessages = uidFolder.getMessagesByUID(sinceUid + 1, UIDFolder.LASTUID)
+            val fetchProfile = FetchProfile()
+            fetchProfile.add(FetchProfile.Item.ENVELOPE)
+            folder.fetch(newMessages, fetchProfile)
+
+            val infos = newMessages.mapNotNull { msg ->
+                val uid = uidFolder.getUID(msg)
+                if (uid > sinceUid) {
+                    NewMailInfo(
+                        uid = uid,
+                        from = decodeMimeWords(msg.from?.joinToString(", ") { it.toString() } ?: "(неизвестно)"),
+                        subject = decodeMimeWords(msg.subject ?: "(без темы)")
+                    )
+                } else null
+            }
+
+            Result.success(Pair(infos, currentHighestUid))
+        } catch (e: Exception) {
+            Result.failure(e)
+        } finally {
+            try { folder?.close(false) } catch (_: Exception) {}
+            try { store?.close() } catch (_: Exception) {}
+        }
+    }
+
+    suspend fun markAsReadByUid(
+        host: String, port: Int, email: String, password: String, uid: Long, folderName: String = "INBOX"
+    ): Result<Unit> = withContext(Dispatchers.IO) {
+        var store: Store? = null
+        var folder: Folder? = null
+        try {
+            store = openStore(host, port, email, password)
+            folder = store.getFolder(folderName)
+            folder.open(Folder.READ_WRITE)
+            val message = (folder as UIDFolder).getMessageByUID(uid) ?: return@withContext Result.failure(Exception("Письмо не найдено"))
+            message.setFlag(Flags.Flag.SEEN, true)
+            Result.success(Unit)
+        } catch (e: Exception) {
+            Result.failure(e)
+        } finally {
+            try { folder?.close(false) } catch (_: Exception) {}
+            try { store?.close() } catch (_: Exception) {}
+        }
+    }
+
+    suspend fun moveToSpamByUid(
+        host: String, port: Int, email: String, password: String, uid: Long, folderName: String = "INBOX"
+    ): Result<Unit> = withContext(Dispatchers.IO) {
+        var store: Store? = null
+        var folder: Folder? = null
+        try {
+            store = openStore(host, port, email, password)
+            val folders = listFolders(host, port, email, password).getOrElse { return@withContext Result.failure(it) }
+            val spamFolder = folders.firstOrNull { name -> spamFolderNames.any { it.equals(name, ignoreCase = true) } }
+                ?: return@withContext Result.failure(Exception("Папка «Спам» не найдена"))
+
+            folder = store.getFolder(folderName)
+            folder.open(Folder.READ_WRITE)
+            val message = (folder as UIDFolder).getMessageByUID(uid) ?: return@withContext Result.failure(Exception("Письмо не найдено"))
+            val destFolder = store.getFolder(spamFolder)
+            folder.copyMessages(arrayOf(message), destFolder)
+            message.setFlag(Flags.Flag.DELETED, true)
+            Result.success(Unit)
+        } catch (e: Exception) {
+            Result.failure(e)
+        } finally {
+            try { folder?.close(true) } catch (_: Exception) {}
+            try { store?.close() } catch (_: Exception) {}
+        }
+    }
+
+    suspend fun moveToTrashByUid(
+        host: String, port: Int, email: String, password: String, uid: Long, folderName: String = "INBOX"
+    ): Result<Unit> = withContext(Dispatchers.IO) {
+        var store: Store? = null
+        var folder: Folder? = null
+        try {
+            store = openStore(host, port, email, password)
+            val folders = listFolders(host, port, email, password).getOrElse { return@withContext Result.failure(it) }
+            val trashFolder = folders.firstOrNull { name -> trashFolderNames.any { it.equals(name, ignoreCase = true) } }
+                ?: return@withContext Result.failure(Exception("Папка «Корзина» не найдена"))
+
+            folder = store.getFolder(folderName)
+            folder.open(Folder.READ_WRITE)
+            val message = (folder as UIDFolder).getMessageByUID(uid) ?: return@withContext Result.failure(Exception("Письмо не найдено"))
+            val destFolder = store.getFolder(trashFolder)
+            folder.copyMessages(arrayOf(message), destFolder)
+            message.setFlag(Flags.Flag.DELETED, true)
+            Result.success(Unit)
+        } catch (e: Exception) {
+            Result.failure(e)
+        } finally {
+            try { folder?.close(true) } catch (_: Exception) {}
+            try { store?.close() } catch (_: Exception) {}
+        }
+    }
 
     val presets = listOf(
         ServerPreset("Yandex", "imap.yandex.ru", 993, "smtp.yandex.ru", 465),

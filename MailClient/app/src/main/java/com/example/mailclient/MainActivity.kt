@@ -41,6 +41,15 @@ import androidx.compose.ui.viewinterop.AndroidView
 import kotlinx.coroutines.launch
 import androidx.compose.foundation.horizontalScroll
 import androidx.activity.compose.BackHandler
+import android.Manifest
+import android.content.pm.PackageManager
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.ContextCompat
+import androidx.work.PeriodicWorkRequestBuilder
+import androidx.work.WorkManager
+import java.util.concurrent.TimeUnit
+import android.os.Build
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -87,6 +96,26 @@ private fun avatarLetterFor(text: String): String {
 @Composable
 fun AppRoot() {
     val context = LocalContext.current
+    val notificationPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { }
+
+    LaunchedEffect(Unit) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            val granted = ContextCompat.checkSelfPermission(
+                context, Manifest.permission.POST_NOTIFICATIONS
+            ) == PackageManager.PERMISSION_GRANTED
+            if (!granted) {
+                notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+            }
+        }
+        val workRequest = PeriodicWorkRequestBuilder<MailCheckWorker>(15, TimeUnit.MINUTES).build()
+        WorkManager.getInstance(context).enqueueUniquePeriodicWork(
+            "mail_check_worker",
+            androidx.work.ExistingPeriodicWorkPolicy.KEEP,
+            workRequest
+        )
+    }
     var screen by remember { mutableStateOf<Screen>(Screen.CheckingSavedLogin) }
     var host by remember { mutableStateOf("") }
     var port by remember { mutableStateOf(993) }
