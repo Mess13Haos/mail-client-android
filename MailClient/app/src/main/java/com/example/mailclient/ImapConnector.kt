@@ -94,6 +94,26 @@ object ImapConnector {
         }
     }
 
+    suspend fun markAsRead(
+        host: String, port: Int, email: String, password: String, msgNum: Int, folderName: String = "INBOX"
+    ): Result<Unit> = withContext(Dispatchers.IO) {
+        var store: Store? = null
+        var folder: Folder? = null
+        try {
+            store = openStore(host, port, email, password)
+            folder = store.getFolder(folderName)
+            folder.open(Folder.READ_WRITE)
+            val message = folder.getMessage(msgNum) ?: return@withContext Result.failure(Exception("Письмо не найдено"))
+            message.setFlag(Flags.Flag.SEEN, true)
+            Result.success(Unit)
+        } catch (e: Exception) {
+            Result.failure(e)
+        } finally {
+            try { folder?.close(false) } catch (_: Exception) {}
+            try { store?.close() } catch (_: Exception) {}
+        }
+    }
+
     suspend fun moveToSpamByUid(
         host: String, port: Int, email: String, password: String, uid: Long, folderName: String = "INBOX"
     ): Result<Unit> = withContext(Dispatchers.IO) {
@@ -185,11 +205,16 @@ object ImapConnector {
     }
 
     fun displayNameFor(folderName: String): String {
-        return when {
-            folderName.equals("INBOX", ignoreCase = true) -> "Входящие"
-            isTrashFolder(folderName) -> "Корзина"
-            isSpamFolder(folderName) -> "Спам"
+        val clean = when {
+            folderName.startsWith("INBOX/", ignoreCase = true) -> folderName.substring(6)
+            folderName.startsWith("INBOX.", ignoreCase = true) -> folderName.substring(6)
             else -> folderName
+        }
+        return when {
+            clean.equals("INBOX", ignoreCase = true) -> "Входящие"
+            isTrashFolder(clean) -> "Корзина"
+            isSpamFolder(clean) -> "Спам"
+            else -> clean
         }
     }
 
@@ -350,12 +375,29 @@ object ImapConnector {
             val all = defaultFolder.list("*")
             val selectable = all.filter { (it.type and Folder.HOLDS_MESSAGES) != 0 }
             val names = selectable.map { it.fullName }
-            val sorted = names.sortedWith(
-                compareBy(
-                    { if (it.equals("INBOX", ignoreCase = true)) 0 else 1 },
-                    { it }
-                )
-            )
+            val sorted = names.sortedWith(Comparator { a, b ->
+                val aIsTrash = isTrashFolder(a) || isTrashFolder(displayNameFor(a))
+                val bIsTrash = isTrashFolder(b) || isTrashFolder(displayNameFor(b))
+                val aIsSpam = isSpamFolder(a) || isSpamFolder(displayNameFor(a))
+                val bIsSpam = isSpamFolder(b) || isSpamFolder(displayNameFor(b))
+
+                val aRank = when {
+                    aIsTrash -> 3
+                    aIsSpam -> 2
+                    else -> 1
+                }
+                val bRank = when {
+                    bIsTrash -> 3
+                    bIsSpam -> 2
+                    else -> 1
+                }
+
+                if (aRank != bRank) {
+                    aRank.compareTo(bRank)
+                } else {
+                    displayNameFor(a).compareTo(displayNameFor(b), ignoreCase = true)
+                }
+            })
             Result.success(sorted)
         } catch (e: Exception) {
             Result.failure(e)

@@ -6,6 +6,8 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -27,6 +29,7 @@ import androidx.compose.material.icons.filled.LightMode
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.*
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -485,6 +488,11 @@ fun AccountListScreen(
     onRemoveAccount: (CredentialStore.SavedAccount) -> Unit,
     onBack: () -> Unit
 ) {
+    val context = LocalContext.current
+    var leftGesture by remember { mutableStateOf(ThemeStore.getLeftGesture(context)) }
+    var rightGesture by remember { mutableStateOf(ThemeStore.getRightGesture(context)) }
+    var showLeftDialog by remember { mutableStateOf(false) }
+    var showRightDialog by remember { mutableStateOf(false) }
     var pendingDelete by remember { mutableStateOf<CredentialStore.SavedAccount?>(null) }
 
     Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
@@ -492,7 +500,7 @@ fun AccountListScreen(
             IconButton(onClick = onBack) {
                 Icon(Icons.Filled.ArrowBack, contentDescription = "Назад")
             }
-            Text("Аккаунты", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+            Text("Аккаунты и настройки", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
         }
 
         if (isBusy) {
@@ -504,6 +512,33 @@ fun AccountListScreen(
         if (errorText.isNotEmpty()) {
             Text(errorText, color = MaterialTheme.colorScheme.error)
         }
+
+        Spacer(modifier = Modifier.height(4.dp))
+        Text("Настройки жестов", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+        Spacer(modifier = Modifier.height(4.dp))
+        ElevatedCard(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(14.dp)) {
+            Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().clickable { showLeftDialog = true }.padding(vertical = 4.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("Жест влево")
+                    Text(leftGesture.title, color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.SemiBold)
+                }
+                HorizontalDivider()
+                Row(
+                    modifier = Modifier.fillMaxWidth().clickable { showRightDialog = true }.padding(vertical = 4.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("Жест вправо")
+                    Text(rightGesture.title, color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.SemiBold)
+                }
+            }
+        }
+        Spacer(modifier = Modifier.height(12.dp))
+        Text("Аккаунты", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
 
         LazyColumn(
             modifier = Modifier.weight(1f),
@@ -566,6 +601,76 @@ fun AccountListScreen(
         }
     }
 
+    if (showLeftDialog) {
+        AlertDialog(
+            onDismissRequest = { showLeftDialog = false },
+            title = { Text("Жест влево") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    ThemeStore.GestureAction.values().forEach { action ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    leftGesture = action
+                                    ThemeStore.setLeftGesture(context, action)
+                                    showLeftDialog = false
+                                }
+                                .padding(vertical = 12.dp, horizontal = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            RadioButton(selected = leftGesture == action, onClick = {
+                                leftGesture = action
+                                ThemeStore.setLeftGesture(context, action)
+                                showLeftDialog = false
+                            })
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(action.title)
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showLeftDialog = false }) { Text("Закрыть") }
+            }
+        )
+    }
+
+    if (showRightDialog) {
+        AlertDialog(
+            onDismissRequest = { showRightDialog = false },
+            title = { Text("Жест вправо") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    ThemeStore.GestureAction.values().forEach { action ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    rightGesture = action
+                                    ThemeStore.setRightGesture(context, action)
+                                    showRightDialog = false
+                                }
+                                .padding(vertical = 12.dp, horizontal = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            RadioButton(selected = rightGesture == action, onClick = {
+                                rightGesture = action
+                                ThemeStore.setRightGesture(context, action)
+                                showRightDialog = false
+                            })
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(action.title)
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showRightDialog = false }) { Text("Закрыть") }
+            }
+        )
+    }
+
     val toDelete = pendingDelete
     if (toDelete != null) {
         AlertDialog(
@@ -585,7 +690,7 @@ fun AccountListScreen(
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun MailboxScreen(
     host: String,
@@ -601,13 +706,18 @@ fun MailboxScreen(
     onOpenFolders: () -> Unit,
     onCompose: () -> Unit
 ) {
+    val context = LocalContext.current
     var offset by remember { mutableStateOf(0) }
     var totalCount by remember { mutableStateOf(0) }
     var messages by remember { mutableStateOf(listOf<ImapConnector.MailHeader>()) }
     var isLoading by remember { mutableStateOf(false) }
     var errorText by remember { mutableStateOf("") }
+    var selectedMailForMenu by remember { mutableStateOf<ImapConnector.MailHeader?>(null) }
     val scope = rememberCoroutineScope()
     val pageSize = 20
+
+    val leftGesture = remember { ThemeStore.getLeftGesture(context) }
+    val rightGesture = remember { ThemeStore.getRightGesture(context) }
 
     fun loadPage(newOffset: Int) {
         isLoading = true
@@ -631,6 +741,40 @@ fun MailboxScreen(
 
     LaunchedEffect(folderName, reloadKey) {
         loadPage(0)
+    }
+
+    fun deleteOrTrash(msgNum: Int) {
+        scope.launch {
+            isLoading = true
+            if (ImapConnector.isTrashFolder(folderName) || ImapConnector.isSpamFolder(folderName)) {
+                ImapConnector.deleteMessage(host, port, email, password, msgNum, folderName)
+            } else {
+                ImapConnector.moveToTrash(host, port, email, password, msgNum, folderName)
+            }
+            loadPage(offset)
+        }
+    }
+
+    fun executeGestureAction(action: ThemeStore.GestureAction, mail: ImapConnector.MailHeader) {
+        when (action) {
+            ThemeStore.GestureAction.DELETE -> {
+                deleteOrTrash(mail.msgNum)
+            }
+            ThemeStore.GestureAction.MARK_READ -> {
+                scope.launch {
+                    ImapConnector.markAsRead(host, port, email, password, mail.msgNum, folderName)
+                    loadPage(offset)
+                }
+            }
+            ThemeStore.GestureAction.SPAM -> {
+                scope.launch {
+                    isLoading = true
+                    ImapConnector.moveToSpam(host, port, email, password, mail.msgNum, folderName)
+                    loadPage(offset)
+                }
+            }
+            ThemeStore.GestureAction.NONE -> {}
+        }
     }
 
     val themeIcon = when (themeMode) {
@@ -675,55 +819,104 @@ fun MailboxScreen(
         }
     ) { innerPadding ->
         Column(modifier = Modifier.fillMaxSize().padding(innerPadding).padding(horizontal = 12.dp)) {
-            if (isLoading) {
-                Box(
-                    modifier = Modifier.fillMaxWidth().padding(16.dp),
-                    contentAlignment = Alignment.Center
-                ) {
-                    CircularProgressIndicator()
-                }
-            }
-
             if (errorText.isNotEmpty()) {
                 Text(errorText, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(vertical = 8.dp))
             }
 
-            LazyColumn(
-                modifier = Modifier.weight(1f),
-                contentPadding = PaddingValues(vertical = 8.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
+            PullToRefreshBox(
+                isRefreshing = isLoading,
+                onRefresh = { loadPage(0) },
+                modifier = Modifier.weight(1f)
             ) {
-                items(messages) { mail ->
-                    ElevatedCard(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable { onOpenMessage(mail) },
-                        shape = RoundedCornerShape(14.dp)
-                    ) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth().padding(12.dp),
-                            verticalAlignment = Alignment.Top
-                        ) {
-                            Box(
-                                modifier = Modifier
-                                    .size(40.dp)
-                                    .clip(CircleShape)
-                                    .background(avatarColorFor(mail.from)),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Text(avatarLetterFor(mail.from), color = Color.White, fontWeight = FontWeight.Bold)
+                LazyColumn(
+                    modifier = Modifier.fillMaxSize(),
+                    contentPadding = PaddingValues(vertical = 8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    items(messages, key = { it.msgNum }) { mail ->
+                        val dismissState = rememberSwipeToDismissBoxState(
+                            confirmValueChange = { dismissValue ->
+                                when (dismissValue) {
+                                    SwipeToDismissBoxValue.StartToEnd -> {
+                                        executeGestureAction(rightGesture, mail)
+                                        false
+                                    }
+                                    SwipeToDismissBoxValue.EndToStart -> {
+                                        executeGestureAction(leftGesture, mail)
+                                        false
+                                    }
+                                    SwipeToDismissBoxValue.Settled -> false
+                                }
                             }
-                            Spacer(modifier = Modifier.width(12.dp))
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text(mail.from, fontWeight = FontWeight.Bold, maxLines = 1)
-                                Spacer(modifier = Modifier.height(2.dp))
-                                Text(mail.subject, maxLines = 2, style = MaterialTheme.typography.bodyMedium)
-                                Spacer(modifier = Modifier.height(4.dp))
-                                Text(
-                                    mail.date,
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
+                        )
+
+                        SwipeToDismissBox(
+                            state = dismissState,
+                            backgroundContent = {
+                                val direction = dismissState.dismissDirection
+                                val color = when (direction) {
+                                    SwipeToDismissBoxValue.StartToEnd -> MaterialTheme.colorScheme.primaryContainer
+                                    SwipeToDismissBoxValue.EndToStart -> MaterialTheme.colorScheme.errorContainer
+                                    else -> Color.Transparent
+                                }
+                                val alignment = when (direction) {
+                                    SwipeToDismissBoxValue.StartToEnd -> Alignment.CenterStart
+                                    SwipeToDismissBoxValue.EndToStart -> Alignment.CenterEnd
+                                    else -> Alignment.Center
+                                }
+                                val actionText = when (direction) {
+                                    SwipeToDismissBoxValue.StartToEnd -> rightGesture.title
+                                    SwipeToDismissBoxValue.EndToStart -> leftGesture.title
+                                    else -> ""
+                                }
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxSize()
+                                        .background(color, RoundedCornerShape(14.dp))
+                                        .padding(horizontal = 20.dp),
+                                    contentAlignment = alignment
+                                ) {
+                                    if (actionText.isNotEmpty() && actionText != "Ничего") {
+                                        Text(actionText, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
+                                    }
+                                }
+                            }
+                        ) {
+                            ElevatedCard(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .combinedClickable(
+                                        onClick = { onOpenMessage(mail) },
+                                        onLongClick = { selectedMailForMenu = mail }
+                                    ),
+                                shape = RoundedCornerShape(14.dp)
+                            ) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth().padding(12.dp),
+                                    verticalAlignment = Alignment.Top
+                                ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(40.dp)
+                                            .clip(CircleShape)
+                                            .background(avatarColorFor(mail.from)),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Text(avatarLetterFor(mail.from), color = Color.White, fontWeight = FontWeight.Bold)
+                                    }
+                                    Spacer(modifier = Modifier.width(12.dp))
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(mail.from, fontWeight = FontWeight.Bold, maxLines = 1)
+                                        Spacer(modifier = Modifier.height(2.dp))
+                                        Text(mail.subject, maxLines = 2, style = MaterialTheme.typography.bodyMedium)
+                                        Spacer(modifier = Modifier.height(4.dp))
+                                        Text(
+                                            mail.date,
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                }
                             }
                         }
                     }
@@ -763,6 +956,55 @@ fun MailboxScreen(
                 }
             }
         }
+    }
+
+    val mailForMenu = selectedMailForMenu
+    if (mailForMenu != null) {
+        AlertDialog(
+            onDismissRequest = { selectedMailForMenu = null },
+            title = { Text("Действие с письмом") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    TextButton(
+                        onClick = {
+                            selectedMailForMenu = null
+                            scope.launch {
+                                ImapConnector.markAsRead(host, port, email, password, mailForMenu.msgNum, folderName)
+                                loadPage(offset)
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("Пометить прочитанным")
+                    }
+                    TextButton(
+                        onClick = {
+                            selectedMailForMenu = null
+                            scope.launch {
+                                isLoading = true
+                                ImapConnector.moveToSpam(host, port, email, password, mailForMenu.msgNum, folderName)
+                                loadPage(offset)
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("В спам")
+                    }
+                    TextButton(
+                        onClick = {
+                            selectedMailForMenu = null
+                            deleteOrTrash(mailForMenu.msgNum)
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("Удалить", color = MaterialTheme.colorScheme.error)
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { selectedMailForMenu = null }) { Text("Отмена") }
+            }
+        )
     }
 }
 
@@ -1133,19 +1375,82 @@ fun FolderListScreen(
             Text(errorText, color = MaterialTheme.colorScheme.error)
         }
 
+        val rootFolders = mutableListOf<String>()
+        val inboxSubfolders = mutableListOf<String>()
+
+        folders.forEach { folder ->
+            val upper = folder.uppercase()
+            if (upper.startsWith("INBOX/") || upper.startsWith("INBOX.")) {
+                inboxSubfolders.add(folder)
+            } else {
+                rootFolders.add(folder)
+            }
+        }
+
+        inboxSubfolders.sortWith(Comparator { a, b ->
+            ImapConnector.displayNameFor(a).compareTo(ImapConnector.displayNameFor(b), ignoreCase = true)
+        })
+
+        rootFolders.sortWith(Comparator { a, b ->
+            val aIsTrash = ImapConnector.isTrashFolder(a) || ImapConnector.isTrashFolder(ImapConnector.displayNameFor(a))
+            val bIsTrash = ImapConnector.isTrashFolder(b) || ImapConnector.isTrashFolder(ImapConnector.displayNameFor(b))
+            val aIsSpam = ImapConnector.isSpamFolder(a) || ImapConnector.isSpamFolder(ImapConnector.displayNameFor(a))
+            val bIsSpam = ImapConnector.isSpamFolder(b) || ImapConnector.isSpamFolder(ImapConnector.displayNameFor(b))
+
+            val aRank = when {
+                aIsTrash -> 3
+                aIsSpam -> 2
+                else -> 1
+            }
+            val bRank = when {
+                bIsTrash -> 3
+                bIsSpam -> 2
+                else -> 1
+            }
+
+            if (aRank != bRank) {
+                aRank.compareTo(bRank)
+            } else {
+                ImapConnector.displayNameFor(a).compareTo(ImapConnector.displayNameFor(b), ignoreCase = true)
+            }
+        })
+
         LazyColumn(
             contentPadding = PaddingValues(vertical = 8.dp),
             verticalArrangement = Arrangement.spacedBy(6.dp)
         ) {
-            items(folders) { folder ->
-                ElevatedCard(
-                    modifier = Modifier.fillMaxWidth().clickable { onSelectFolder(folder) },
-                    shape = RoundedCornerShape(12.dp)
-                ) {
-                    Text(
-                        ImapConnector.displayNameFor(folder),
-                        modifier = Modifier.fillMaxWidth().padding(14.dp)
-                    )
+            rootFolders.forEach { folder ->
+                item(key = folder) {
+                    ElevatedCard(
+                        modifier = Modifier.fillMaxWidth().clickable { onSelectFolder(folder) },
+                        shape = RoundedCornerShape(12.dp)
+                    ) {
+                        Text(
+                            ImapConnector.displayNameFor(folder),
+                            modifier = Modifier.fillMaxWidth().padding(14.dp),
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+                }
+                if (folder.equals("INBOX", ignoreCase = true)) {
+                    items(inboxSubfolders, key = { it }) { sub ->
+                        ElevatedCard(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(start = 24.dp)
+                                .clickable { onSelectFolder(sub) },
+                            shape = RoundedCornerShape(10.dp),
+                            colors = CardDefaults.elevatedCardColors(
+                                containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+                            )
+                        ) {
+                            Text(
+                                ImapConnector.displayNameFor(sub),
+                                modifier = Modifier.fillMaxWidth().padding(12.dp),
+                                style = MaterialTheme.typography.bodyMedium
+                            )
+                        }
+                    }
                 }
             }
         }
