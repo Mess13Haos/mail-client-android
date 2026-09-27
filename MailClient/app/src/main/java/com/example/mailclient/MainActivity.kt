@@ -1,9 +1,12 @@
 package com.example.mailclient
 
 import android.os.Bundle
+import android.content.Context
+import java.io.OutputStream
 import android.webkit.WebView
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -45,6 +48,7 @@ import kotlinx.coroutines.launch
 import androidx.compose.foundation.horizontalScroll
 import androidx.activity.compose.BackHandler
 import android.Manifest
+import android.content.ContentValues
 import android.content.pm.PackageManager
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -53,10 +57,16 @@ import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import java.util.concurrent.TimeUnit
 import android.os.Build
+import android.os.Environment
+import android.provider.MediaStore
+import android.webkit.MimeTypeMap
+import android.widget.Toast
+import java.io.File
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        enableEdgeToEdge()
         setContent {
             AppRoot()
         }
@@ -381,6 +391,7 @@ fun LoginScreen(
     Column(
         modifier = Modifier
             .fillMaxSize()
+            .safeDrawingPadding()
             .padding(24.dp)
             .verticalScroll(rememberScrollState()),
         verticalArrangement = Arrangement.spacedBy(12.dp)
@@ -495,7 +506,7 @@ fun AccountListScreen(
     var showRightDialog by remember { mutableStateOf(false) }
     var pendingDelete by remember { mutableStateOf<CredentialStore.SavedAccount?>(null) }
 
-    Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
+    Column(modifier = Modifier.fillMaxSize().safeDrawingPadding().padding(16.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             IconButton(onClick = onBack) {
                 Icon(Icons.Filled.ArrowBack, contentDescription = "Назад")
@@ -789,6 +800,7 @@ fun MailboxScreen(
     }
 
     Scaffold(
+        contentWindowInsets = WindowInsets.safeDrawing,
         topBar = {
             TopAppBar(
                 title = {
@@ -1053,6 +1065,7 @@ fun MessageScreen(
     var folderOptions by remember { mutableStateOf(listOf<String>()) }
     var pendingAction by remember { mutableStateOf(PendingAction.NONE) }
     val scope = rememberCoroutineScope()
+    val context = LocalContext.current
     val isBusy = pendingAction != PendingAction.NONE
 
     LaunchedEffect(header.msgNum) {
@@ -1118,6 +1131,7 @@ fun MessageScreen(
     Column(
         modifier = Modifier
             .fillMaxSize()
+            .safeDrawingPadding()
             .padding(horizontal = 16.dp, vertical = 4.dp)
     ) {
         Row(
@@ -1229,6 +1243,50 @@ fun MessageScreen(
                 .horizontalScroll(rememberScrollState())
         ) {
             Text("От: ${header.from} · ${header.date}", style = MaterialTheme.typography.bodySmall, maxLines = 1)
+        }
+
+        if (body.attachments.isNotEmpty()) {
+            Spacer(modifier = Modifier.height(4.dp))
+            Text("Вложения (${body.attachments.size}):", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
+            Spacer(modifier = Modifier.height(4.dp))
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                body.attachments.forEach { att ->
+                    var isDownloading by remember { mutableStateOf(false) }
+                    ElevatedButton(
+                        onClick = {
+                            isDownloading = true
+                            scope.launch {
+                                val result = ImapConnector.downloadAttachment(host, port, email, password, header.msgNum, folderName, att.index)
+                                isDownloading = false
+                                result.fold(
+                                    onSuccess = { (fileName, bytes) ->
+                                        val saved = saveAttachmentToDownloads(context, fileName, bytes)
+                                        if (saved) {
+                                            Toast.makeText(context, "Сохранено в Загрузки: $fileName", Toast.LENGTH_LONG).show()
+                                        } else {
+                                            Toast.makeText(context, "Ошибка сохранения файла", Toast.LENGTH_SHORT).show()
+                                        }
+                                    },
+                                    onFailure = { err ->
+                                        Toast.makeText(context, "Ошибка скачивания: ${err.message}", Toast.LENGTH_SHORT).show()
+                                    }
+                                )
+                            }
+                        },
+                        enabled = !isDownloading,
+                        shape = RoundedCornerShape(10.dp)
+                    ) {
+                        Icon(Icons.Filled.Add, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(if (isDownloading) "Скачивание..." else att.fileName, maxLines = 1)
+                    }
+                }
+            }
         }
 
         Divider(modifier = Modifier.padding(vertical = 4.dp))
@@ -1357,7 +1415,7 @@ fun FolderListScreen(
         )
     }
 
-    Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
+    Column(modifier = Modifier.fillMaxSize().safeDrawingPadding().padding(16.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             IconButton(onClick = onBack) {
                 Icon(Icons.Filled.ArrowBack, contentDescription = "Назад")
@@ -1477,6 +1535,7 @@ fun ComposeScreen(
     Column(
         modifier = Modifier
             .fillMaxSize()
+            .safeDrawingPadding()
             .padding(16.dp)
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1544,4 +1603,44 @@ fun ComposeScreen(
             Text(if (isSending) "Отправка..." else "Отправить")
         }
     }
+}
+
+private fun saveAttachmentToDownloads(context: Context, fileName: String, bytes: ByteArray): Boolean {
+    return try {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val contentValues = ContentValues().apply {
+                put(MediaStore.Downloads.DISPLAY_NAME, fileName)
+                put(MediaStore.Downloads.MIME_TYPE, getMimeTypeForFile(fileName))
+                put(MediaStore.Downloads.IS_PENDING, 1)
+            }
+            val resolver = context.contentResolver
+            val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, contentValues)
+            if (uri != null) {
+                resolver.openOutputStream(uri)?.use { outputStream ->
+                    outputStream.write(bytes)
+                }
+                contentValues.clear()
+                contentValues.put(MediaStore.Downloads.IS_PENDING, 0)
+                resolver.update(uri, contentValues, null, null)
+                true
+            } else false
+        } else {
+            val downloadsDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+            downloadsDir.mkdirs()
+            val file = File(downloadsDir, fileName)
+            file.writeBytes(bytes)
+            true
+        }
+    } catch (e: Exception) {
+        false
+    }
+}
+
+private fun getMimeTypeForFile(fileName: String): String {
+    val extension = MimeTypeMap.getFileExtensionFromUrl(fileName)
+    if (extension != null) {
+        val mime = MimeTypeMap.getSingleton().getMimeTypeFromExtension(extension.lowercase())
+        if (mime != null) return mime
+    }
+    return "application/octet-stream"
 }

@@ -325,7 +325,17 @@ object ImapConnector {
         }
     }
 
-    data class MailBody(val displayHtml: String, val plainText: String)
+    data class AttachmentInfo(
+        val index: Int,
+        val fileName: String,
+        val contentType: String
+    )
+
+    data class MailBody(
+        val displayHtml: String,
+        val plainText: String,
+        val attachments: List<AttachmentInfo> = emptyList()
+    )
 
     suspend fun fetchMessageBody(
         host: String,
@@ -343,7 +353,9 @@ object ImapConnector {
             folder.open(Folder.READ_ONLY)
 
             val message = folder.getMessage(msgNum)
-            val (plain, html) = extractParts(message)
+            val attachments = mutableListOf<AttachmentInfo>()
+            var counter = 0
+            val (plain, html) = extractParts(message, attachments) { counter++ }
 
             val plainText = (plain ?: html?.let { stripHtml(it) } ?: "").ifBlank { "(письмо не содержит текста)" }
 
@@ -353,7 +365,7 @@ object ImapConnector {
                 wrapHtml(escapeHtml(plainText).replace("\n", "<br>"))
             }
 
-            Result.success(MailBody(displayHtml, plainText))
+            Result.success(MailBody(displayHtml, plainText, attachments))
         } catch (e: Exception) {
             Result.failure(e)
         } finally {
@@ -518,31 +530,106 @@ object ImapConnector {
         moveMessage(host, port, email, password, msgNum, fromFolder, "INBOX")
     }
 
-    private fun extractParts(part: Part): Pair<String?, String?> {
+    private fun extractParts(
+        part: Part,
+        attachments: MutableList<AttachmentInfo>,
+        nextIndex: () -> Int
+    ): Pair<String?, String?> {
+        val disposition = try { part.disposition } catch (_: Exception) { null }
+        val rawFileName = try { part.fileName } catch (_: Exception) { null }
+        val fileName = rawFileName?.let { decodeMimeWords(it) }
+
+        val isAttachment = (disposition != null && (disposition.equals(Part.ATTACHMENT, ignoreCase = true) || disposition.equals(Part.INLINE, ignoreCase = true))) ||
+                (fileName != null && fileName.isNotBlank() && !part.isMimeType("text/plain") && !part.isMimeType("text/html"))
+
+        if (isAttachment && fileName != null) {
+            val contentType = try { part.contentType ?: "application/octet-stream" } catch (_: Exception) { "application/octet-stream" }
+            attachments.add(
+                AttachmentInfo(
+                    index = nextIndex(),
+                    fileName = fileName,
+                    contentType = contentType.substringBefore(';')
+                )
+            )
+            return Pair(null, null)
+        }
+
         return when {
-            part.isMimeType("text/plain") -> Pair(part.content as? String, null)
-            part.isMimeType("text/html") -> Pair(null, part.content as? String)
+            part.isMimeType("text/plain") && fileName == null -> Pair(part.content as? String, null)
+            part.isMimeType("text/html") && fileName == null -> Pair(null, part.content as? String)
             part.isMimeType("multipart/*") -> {
                 val mp = part.content as Multipart
                 var plain: String? = null
                 var html: String? = null
                 for (i in 0 until mp.count) {
                     val bodyPart = mp.getBodyPart(i)
-                    when {
-                        bodyPart.isMimeType("text/plain") && plain == null ->
-                            plain = bodyPart.content as? String
-                        bodyPart.isMimeType("text/html") && html == null ->
-                            html = bodyPart.content as? String
-                        bodyPart.isMimeType("multipart/*") -> {
-                            val (nestedPlain, nestedHtml) = extractParts(bodyPart)
-                            if (plain == null) plain = nestedPlain
-                            if (html == null) html = nestedHtml
-                        }
-                    }
+                    val (nestedPlain, nestedHtml) = extractParts(bodyPart, attachments, nextIndex)
+                    if (plain == null) plain = nestedPlain
+                    if (html == null) html = nestedHtml
                 }
                 Pair(plain, html)
             }
             else -> Pair(null, null)
+        }
+    }
+
+    suspend fun downloadAttachment(
+        host: String, port: Int, email: String, password: String,
+        msgNum: Int, folderName: String, targetIndex: Int
+    ): Result<Pair<String, ByteArray>> = withContext(Dispatchers.IO) {
+        var store: Store? = null
+        var folder: Folder? = null
+        try {
+            store = openStore(host, port, email, password)
+            folder = store.getFolder(folderName)
+            folder.open(Folder.READ_ONLY)
+            val message = folder.getMessage(msgNum)
+
+            var foundResult: Pair<String, ByteArray>? = null
+            var counter = 0
+
+            fun findAndRead(p: Part) {
+                if (foundResult != null) return
+                val disposition = try { p.disposition } catch (_: Exception) { null }
+                val rawFileName = try { p.fileName } catch (_: Exception) { null }
+                val fileName = rawFileName?.let { decodeMimeWords(it) }
+
+                val isAttachment = (disposition != null && (disposition.equals(Part.ATTACHMENT, ignoreCase = true) || disposition.equals(Part.INLINE, ignoreCase = true))) ||
+                        (fileName != null && fileName.isNotBlank() && !p.isMimeType("text/plain") && !p.isMimeType("text/html"))
+
+                if (isAttachment && fileName != null) {
+                    if (counter == targetIndex) {
+                        val inputStream = p.inputStream
+                        val bytes = inputStream.readBytes()
+                        foundResult = Pair(fileName, bytes)
+                        return
+                    }
+                    counter++
+                }
+
+                if (p.isMimeType("multipart/*")) {
+                    try {
+                        val mp = p.content as Multipart
+                        for (i in 0 until mp.count) {
+                            findAndRead(mp.getBodyPart(i))
+                            if (foundResult != null) return
+                        }
+                    } catch (_: Exception) {}
+                }
+            }
+
+            findAndRead(message)
+
+            if (foundResult != null) {
+                Result.success(foundResult!!)
+            } else {
+                Result.failure(Exception("Вложение не найдено"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        } finally {
+            try { folder?.close(false) } catch (_: Exception) {}
+            try { store?.close() } catch (_: Exception) {}
         }
     }
 
