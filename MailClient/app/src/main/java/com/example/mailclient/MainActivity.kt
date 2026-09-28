@@ -2,6 +2,7 @@ package com.example.mailclient
 
 import android.os.Bundle
 import android.content.Context
+import android.content.Intent
 import java.io.OutputStream
 import android.webkit.WebView
 import androidx.activity.ComponentActivity
@@ -21,6 +22,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AccountCircle
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.BrightnessAuto
@@ -48,6 +50,7 @@ import kotlinx.coroutines.launch
 import androidx.compose.foundation.horizontalScroll
 import androidx.activity.compose.BackHandler
 import android.Manifest
+import android.app.NotificationManager
 import android.content.ContentValues
 import android.content.pm.PackageManager
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -87,6 +90,7 @@ sealed class Screen {
     object FolderList : Screen()
     data class Compose(val prefill: ComposePrefill = ComposePrefill()) : Screen()
     object AccountList : Screen()
+    object Settings : Screen()
 }
 
 private val avatarPalette = listOf(
@@ -163,6 +167,11 @@ fun AppRoot() {
     }
 
     LaunchedEffect(Unit) {
+        try {
+            val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            notificationManager.cancelAll()
+        } catch (_: Exception) {}
+
         val result = UpdateChecker.checkForUpdate(BuildConfig.VERSION_NAME)
         result.onSuccess { info ->
             if (info != null) {
@@ -204,6 +213,7 @@ fun AppRoot() {
             is Screen.FolderList -> screen = Screen.Mailbox
             is Screen.Compose -> screen = Screen.Mailbox
             is Screen.AccountList -> screen = Screen.Mailbox
+            is Screen.Settings -> screen = Screen.Mailbox
             is Screen.Login -> if (current.showBack) screen = Screen.AccountList
             else -> {}
         }
@@ -242,9 +252,13 @@ fun AppRoot() {
                         ThemeStore.setThemeMode(context, themeMode)
                     },
                     onOpenAccounts = { accountListError = ""; screen = Screen.AccountList },
+                    onOpenSettings = { screen = Screen.Settings },
                     onOpenMessage = { header -> screen = Screen.MessageView(header) },
                     onOpenFolders = { screen = Screen.FolderList },
                     onCompose = { screen = Screen.Compose() }
+                )
+                is Screen.Settings -> SettingsScreen(
+                    onBack = { screen = Screen.Mailbox }
                 )
                 is Screen.MessageView -> MessageScreen(
                     host = host, port = port, email = email, password = password,
@@ -499,11 +513,6 @@ fun AccountListScreen(
     onRemoveAccount: (CredentialStore.SavedAccount) -> Unit,
     onBack: () -> Unit
 ) {
-    val context = LocalContext.current
-    var leftGesture by remember { mutableStateOf(ThemeStore.getLeftGesture(context)) }
-    var rightGesture by remember { mutableStateOf(ThemeStore.getRightGesture(context)) }
-    var showLeftDialog by remember { mutableStateOf(false) }
-    var showRightDialog by remember { mutableStateOf(false) }
     var pendingDelete by remember { mutableStateOf<CredentialStore.SavedAccount?>(null) }
 
     Column(modifier = Modifier.fillMaxSize().safeDrawingPadding().padding(16.dp)) {
@@ -511,7 +520,7 @@ fun AccountListScreen(
             IconButton(onClick = onBack) {
                 Icon(Icons.Filled.ArrowBack, contentDescription = "Назад")
             }
-            Text("Аккаунты и настройки", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+            Text("Аккаунты", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
         }
 
         if (isBusy) {
@@ -523,33 +532,6 @@ fun AccountListScreen(
         if (errorText.isNotEmpty()) {
             Text(errorText, color = MaterialTheme.colorScheme.error)
         }
-
-        Spacer(modifier = Modifier.height(4.dp))
-        Text("Настройки жестов", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-        Spacer(modifier = Modifier.height(4.dp))
-        ElevatedCard(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(14.dp)) {
-            Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Row(
-                    modifier = Modifier.fillMaxWidth().clickable { showLeftDialog = true }.padding(vertical = 4.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text("Жест влево")
-                    Text(leftGesture.title, color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.SemiBold)
-                }
-                HorizontalDivider()
-                Row(
-                    modifier = Modifier.fillMaxWidth().clickable { showRightDialog = true }.padding(vertical = 4.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text("Жест вправо")
-                    Text(rightGesture.title, color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.SemiBold)
-                }
-            }
-        }
-        Spacer(modifier = Modifier.height(12.dp))
-        Text("Аккаунты", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
 
         LazyColumn(
             modifier = Modifier.weight(1f),
@@ -612,76 +594,6 @@ fun AccountListScreen(
         }
     }
 
-    if (showLeftDialog) {
-        AlertDialog(
-            onDismissRequest = { showLeftDialog = false },
-            title = { Text("Жест влево") },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    ThemeStore.GestureAction.values().forEach { action ->
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable {
-                                    leftGesture = action
-                                    ThemeStore.setLeftGesture(context, action)
-                                    showLeftDialog = false
-                                }
-                                .padding(vertical = 12.dp, horizontal = 8.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            RadioButton(selected = leftGesture == action, onClick = {
-                                leftGesture = action
-                                ThemeStore.setLeftGesture(context, action)
-                                showLeftDialog = false
-                            })
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text(action.title)
-                        }
-                    }
-                }
-            },
-            confirmButton = {
-                TextButton(onClick = { showLeftDialog = false }) { Text("Закрыть") }
-            }
-        )
-    }
-
-    if (showRightDialog) {
-        AlertDialog(
-            onDismissRequest = { showRightDialog = false },
-            title = { Text("Жест вправо") },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    ThemeStore.GestureAction.values().forEach { action ->
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable {
-                                    rightGesture = action
-                                    ThemeStore.setRightGesture(context, action)
-                                    showRightDialog = false
-                                }
-                                .padding(vertical = 12.dp, horizontal = 8.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            RadioButton(selected = rightGesture == action, onClick = {
-                                rightGesture = action
-                                ThemeStore.setRightGesture(context, action)
-                                showRightDialog = false
-                            })
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text(action.title)
-                        }
-                    }
-                }
-            },
-            confirmButton = {
-                TextButton(onClick = { showRightDialog = false }) { Text("Закрыть") }
-            }
-        )
-    }
-
     val toDelete = pendingDelete
     if (toDelete != null) {
         AlertDialog(
@@ -713,6 +625,7 @@ fun MailboxScreen(
     themeMode: ThemeStore.ThemeMode,
     onToggleTheme: () -> Unit,
     onOpenAccounts: () -> Unit,
+    onOpenSettings: () -> Unit,
     onOpenMessage: (ImapConnector.MailHeader) -> Unit,
     onOpenFolders: () -> Unit,
     onCompose: () -> Unit
@@ -819,6 +732,9 @@ fun MailboxScreen(
                 actions = {
                     IconButton(onClick = onToggleTheme) {
                         Icon(themeIcon, contentDescription = themeDescription)
+                    }
+                    IconButton(onClick = onOpenSettings) {
+                        Icon(Icons.Filled.Settings, contentDescription = "Настройки")
                     }
                     IconButton(onClick = onOpenAccounts) {
                         Icon(Icons.Filled.AccountCircle, contentDescription = "Аккаунты")
@@ -1643,4 +1559,179 @@ private fun getMimeTypeForFile(fileName: String): String {
         if (mime != null) return mime
     }
     return "application/octet-stream"
+}
+
+@Composable
+fun SettingsScreen(
+    onBack: () -> Unit
+) {
+    val context = LocalContext.current
+    var leftGesture by remember { mutableStateOf(ThemeStore.getLeftGesture(context)) }
+    var rightGesture by remember { mutableStateOf(ThemeStore.getRightGesture(context)) }
+    var showLeftDialog by remember { mutableStateOf(false) }
+    var showRightDialog by remember { mutableStateOf(false) }
+
+    val soundUriStr = remember { mutableStateOf(ThemeStore.getNotificationSoundUri(context)) }
+
+    val audioPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null) {
+            try {
+                context.contentResolver.takePersistableUriPermission(
+                    uri,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION
+                )
+            } catch (_: Exception) {}
+            ThemeStore.setNotificationSoundUri(context, uri.toString())
+            soundUriStr.value = uri.toString()
+            NotificationHelper.ensureChannel(context)
+        }
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .safeDrawingPadding()
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            IconButton(onClick = onBack) {
+                Icon(Icons.Filled.ArrowBack, contentDescription = "Назад")
+            }
+            Text("Настройки", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+        }
+
+        Spacer(modifier = Modifier.height(4.dp))
+
+        Text("Жесты", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+        ElevatedCard(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(14.dp)) {
+            Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().clickable { showLeftDialog = true }.padding(vertical = 4.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("Жест влево")
+                    Text(leftGesture.title, color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.SemiBold)
+                }
+                HorizontalDivider()
+                Row(
+                    modifier = Modifier.fillMaxWidth().clickable { showRightDialog = true }.padding(vertical = 4.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("Жест вправо")
+                    Text(rightGesture.title, color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.SemiBold)
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        Text("Звук уведомления", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+        ElevatedCard(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(14.dp)) {
+            Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    text = if (soundUriStr.value.isBlank()) "Звук по умолчанию" else "Выбран кастомный аудиофайл",
+                    style = MaterialTheme.typography.bodyMedium
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Button(
+                        onClick = { audioPickerLauncher.launch(arrayOf("audio/*")) },
+                        shape = RoundedCornerShape(10.dp),
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text("Выбрать файл")
+                    }
+                    if (soundUriStr.value.isNotBlank()) {
+                        OutlinedButton(
+                            onClick = {
+                                ThemeStore.setNotificationSoundUri(context, "")
+                                soundUriStr.value = ""
+                                NotificationHelper.ensureChannel(context)
+                            },
+                            shape = RoundedCornerShape(10.dp)
+                        ) {
+                            Text("Сбросить")
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if (showLeftDialog) {
+        AlertDialog(
+            onDismissRequest = { showLeftDialog = false },
+            title = { Text("Жест влево") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    ThemeStore.GestureAction.values().forEach { action ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    leftGesture = action
+                                    ThemeStore.setLeftGesture(context, action)
+                                    showLeftDialog = false
+                                }
+                                .padding(vertical = 12.dp, horizontal = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            RadioButton(selected = leftGesture == action, onClick = {
+                                leftGesture = action
+                                ThemeStore.setLeftGesture(context, action)
+                                showLeftDialog = false
+                            })
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(action.title)
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showLeftDialog = false }) { Text("Закрыть") }
+            }
+        )
+    }
+
+    if (showRightDialog) {
+        AlertDialog(
+            onDismissRequest = { showRightDialog = false },
+            title = { Text("Жест вправо") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    ThemeStore.GestureAction.values().forEach { action ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    rightGesture = action
+                                    ThemeStore.setRightGesture(context, action)
+                                    showRightDialog = false
+                                }
+                                .padding(vertical = 12.dp, horizontal = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            RadioButton(selected = rightGesture == action, onClick = {
+                                rightGesture = action
+                                ThemeStore.setRightGesture(context, action)
+                                showRightDialog = false
+                            })
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(action.title)
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showRightDialog = false }) { Text("Закрыть") }
+            }
+        )
+    }
 }

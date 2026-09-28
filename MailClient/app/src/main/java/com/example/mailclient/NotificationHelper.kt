@@ -1,10 +1,14 @@
 package com.example.mailclient
 
+import android.R
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.media.AudioAttributes
+import android.media.RingtoneManager
+import android.net.Uri
 import android.os.Build
 import androidx.core.app.NotificationCompat
 
@@ -22,14 +26,26 @@ object NotificationHelper {
     fun ensureChannel(context: Context) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-            if (manager.getNotificationChannel(CHANNEL_ID) == null) {
-                val channel = NotificationChannel(
-                    CHANNEL_ID,
-                    "Новые письма",
-                    NotificationManager.IMPORTANCE_DEFAULT
-                )
-                manager.createNotificationChannel(channel)
+            val soundUriStr = ThemeStore.getNotificationSoundUri(context)
+            val soundUri = if (soundUriStr.isNotBlank()) Uri.parse(soundUriStr) else RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
+
+            try {
+                manager.deleteNotificationChannel(CHANNEL_ID)
+            } catch (_: Exception) {}
+
+            val audioAttributes = AudioAttributes.Builder()
+                .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                .setUsage(AudioAttributes.USAGE_NOTIFICATION)
+                .build()
+
+            val channel = NotificationChannel(
+                CHANNEL_ID,
+                "Новые письма",
+                NotificationManager.IMPORTANCE_DEFAULT
+            ).apply {
+                setSound(soundUri, audioAttributes)
             }
+            manager.createNotificationChannel(channel)
         }
     }
 
@@ -68,8 +84,11 @@ object NotificationHelper {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
-        val notification = NotificationCompat.Builder(context, CHANNEL_ID)
-            .setSmallIcon(android.R.drawable.ic_dialog_email)
+        val soundUriStr = ThemeStore.getNotificationSoundUri(context)
+        val soundUri = if (soundUriStr.isNotBlank()) Uri.parse(soundUriStr) else null
+
+        val builder = NotificationCompat.Builder(context, CHANNEL_ID)
+            .setSmallIcon(R.drawable.ic_dialog_email)
             .setContentTitle(from)
             .setContentText(subject)
             .setSubText(accountEmail)
@@ -78,7 +97,12 @@ object NotificationHelper {
             .addAction(0, "Прочитано", actionIntent(ACTION_MARK_READ))
             .addAction(0, "Спам", actionIntent(ACTION_SPAM))
             .addAction(0, "Удалить", actionIntent(ACTION_DELETE))
-            .build()
+
+        if (soundUri != null) {
+            builder.setSound(soundUri)
+        }
+
+        val notification = builder.build()
 
         val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         manager.notify(notificationId, notification)

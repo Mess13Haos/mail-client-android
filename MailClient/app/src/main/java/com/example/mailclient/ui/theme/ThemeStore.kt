@@ -7,6 +7,7 @@ object ThemeStore {
     private const val KEY_THEME_MODE = "theme_mode"
     private const val KEY_GESTURE_LEFT = "gesture_left"
     private const val KEY_GESTURE_RIGHT = "gesture_right"
+    private const val KEY_NOTIFICATION_SOUND_URI = "notification_sound_uri"
 
     enum class ThemeMode { SYSTEM, LIGHT, DARK }
 
@@ -65,5 +66,15 @@ object ThemeStore {
     fun setRightGesture(context: Context, action: GestureAction) {
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         prefs.edit().putString(KEY_GESTURE_RIGHT, action.name).apply()
+    }
+
+    fun getNotificationSoundUri(context: Context): String {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        return prefs.getString(KEY_NOTIFICATION_SOUND_URI, "") ?: ""
+    }
+
+    fun setNotificationSoundUri(context: Context, uriString: String) {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        prefs.edit().putString(KEY_NOTIFICATION_SOUND_URI, uriString).apply()
     }
 }
