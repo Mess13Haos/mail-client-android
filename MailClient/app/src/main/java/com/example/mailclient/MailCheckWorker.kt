@@ -18,19 +18,25 @@ class MailCheckWorker(context: Context, params: WorkerParameters) : CoroutineWor
             )
 
             result.onSuccess { (newMessages, newHighestUid) ->
-                newMessages.forEach { mail ->
-                    val notificationId = (account.email + mail.uid).hashCode()
-                    NotificationHelper.showNewMailNotification(
-                        context = applicationContext,
-                        notificationId = notificationId,
-                        accountEmail = account.email,
-                        presetLabel = account.presetLabel,
-                        uid = mail.uid,
-                        from = mail.from,
-                        subject = mail.subject
-                    )
+                if (account.lastNotifiedUid == 0L) {
+                    CredentialStore.updateLastNotifiedUid(applicationContext, account.email, newHighestUid)
+                } else {
+                    newMessages.forEach { mail ->
+                        val notificationId = (account.email + mail.uid).hashCode()
+                        NotificationHelper.showNewMailNotification(
+                            context = applicationContext,
+                            notificationId = notificationId,
+                            accountEmail = account.email,
+                            presetLabel = account.presetLabel,
+                            uid = mail.uid,
+                            from = mail.from,
+                            subject = mail.subject
+                        )
+                    }
+                    if (newHighestUid > account.lastNotifiedUid) {
+                        CredentialStore.updateLastNotifiedUid(applicationContext, account.email, newHighestUid)
+                    }
                 }
-                CredentialStore.updateLastNotifiedUid(applicationContext, account.email, newHighestUid)
             }
         }
 

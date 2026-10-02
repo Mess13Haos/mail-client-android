@@ -167,10 +167,16 @@ object ImapConnector {
     }
 
     val presets = listOf(
-        ServerPreset("Yandex", "imap.yandex.ru", 993, "smtp.yandex.ru", 465),
-        ServerPreset("Mail.ru", "imap.mail.ru", 993, "smtp.mail.ru", 465),
         ServerPreset("Gmail", "imap.gmail.com", 993, "smtp.gmail.com", 465),
+        ServerPreset("iCloud", "imap.mail.me.com", 993, "smtp.mail.me.com", 587),
+        ServerPreset("Mail.ru", "imap.mail.ru", 993, "smtp.mail.ru", 465),
+        ServerPreset("Outlook", "outlook.office365.com", 993, "smtp.office365.com", 587),
+        ServerPreset("Rambler", "imap.rambler.ru", 993, "smtp.rambler.ru", 465),
+        ServerPreset("Seznam.cz", "imap.seznam.cz", 993, "smtp.seznam.cz", 465),
+        ServerPreset("Ukr.net", "imap.ukr.net", 993, "smtp.ukr.net", 465),
         ServerPreset("Yahoo", "imap.mail.yahoo.com", 993, "smtp.mail.yahoo.com", 465),
+        ServerPreset("Yandex", "imap.yandex.ru", 993, "smtp.yandex.ru", 465),
+        ServerPreset("Zoho Mail", "imappro.zoho.com", 993, "smtp.zoho.com", 465),
         ServerPreset("Свой сервер...", "", 993, "", 465)
     )
 
@@ -268,9 +274,20 @@ object ImapConnector {
             put("mail.imaps.port", port.toString())
             put("mail.imaps.ssl.enable", "true")
         }
+        val isOAuth = password.startsWith("ya29.") || password.startsWith("1/") || password.startsWith("y0_") || password.length > 30
+        if (isOAuth) {
+            props.put("mail.imaps.sasl.enable", "true")
+            props.put("mail.imaps.auth.mechanisms", "XOAUTH2")
+            props.put("mail.imaps.sasl.mechanisms", "XOAUTH2")
+        }
         val session = Session.getInstance(props)
         val store = session.getStore("imaps")
-        store.connect(host, port, email, password)
+        if (isOAuth) {
+            val rawToken = "user=$email\u0001auth=Bearer $password\u0001\u0001"
+            store.connect(host, port, email, rawToken)
+        } else {
+            store.connect(host, port, email, password)
+        }
         return store
     }
 
@@ -637,36 +654,33 @@ object ImapConnector {
         return """
             <html>
             <head>
-                <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=3.0">
                 <style>
-                    body { font-family: sans-serif; font-size: 15px; color: #000000; padding: 4px; word-wrap: break-word; max-width: 100%; overflow-x: hidden; }
-                                        body * {
-                        max-width: 100% !important;
-                        box-sizing: border-box !important;
-                        position: static !important;
-                        float: none !important;
-                        margin: 0 !important;
-                        height: auto !important;
-                        min-height: 0 !important;
-                        line-height: 1.4 !important;
-                        top: auto !important;
-                        left: auto !important;
-                        right: auto !important;
-                        bottom: auto !important;
-                        transform: none !important;
+                    body {
+                        font-family: sans-serif;
+                        font-size: 16px;
+                        color: #202124;
+                        background-color: #ffffff;
+                        margin: 0;
+                        padding: 8px;
+                        word-wrap: break-word;
+                        overflow-wrap: break-word;
+                        -webkit-text-size-adjust: 100%;
                     }
-                    table, tbody, thead, tr, td, th {
-                        display: inline !important;
+                    img {
+                        max-width: 100% !important;
+                        height: auto !important;
+                    }
+                    table {
+                        max-width: 100% !important;
                     }
                     td, th {
-                        padding: 0 2px !important;
+                        word-wrap: break-word;
+                        overflow-wrap: break-word;
                     }
-                    p, div {
-                        display: block !important;
-                        margin-bottom: 8px !important;
+                    a {
+                        color: #1a73e8;
                     }
-                    img { height: auto !important; max-width: 100% !important; }
-                    a { color: #1a73e8; }
                 </style>
             </head>
             <body>$innerHtml</body>
@@ -689,5 +703,47 @@ object ImapConnector {
             .replace("&amp;", "&")
             .replace(Regex("[ \\t]+"), " ")
             .trim()
+    }
+
+    suspend fun clearFolder(
+        host: String, port: Int, email: String, password: String, folderName: String
+    ): Result<Unit> = withContext(Dispatchers.IO) {
+        var store: Store? = null
+        var folder: Folder? = null
+        try {
+            store = openStore(host, port, email, password)
+            folder = store.getFolder(folderName)
+            folder.open(Folder.READ_WRITE)
+            val messages = folder.messages
+            if (messages != null && messages.isNotEmpty()) {
+                folder.setFlags(messages, Flags(Flags.Flag.DELETED), true)
+            }
+            Result.success(Unit)
+        } catch (e: Exception) {
+            Result.failure(e)
+        } finally {
+            try { folder?.close(true) } catch (_: Exception) {}
+            try { store?.close() } catch (_: Exception) {}
+        }
+    }
+
+    suspend fun fetchFolderCounts(
+        host: String, port: Int, email: String, password: String, folderName: String
+    ): Result<Pair<Int, Int>> = withContext(Dispatchers.IO) {
+        var store: Store? = null
+        var folder: Folder? = null
+        try {
+            store = openStore(host, port, email, password)
+            folder = store.getFolder(folderName)
+            folder.open(Folder.READ_ONLY)
+            val total = folder.messageCount
+            val unread = folder.unreadMessageCount
+            Result.success(Pair(unread, total))
+        } catch (e: Exception) {
+            Result.success(Pair(0, 0))
+        } finally {
+            try { folder?.close(false) } catch (_: Exception) {}
+            try { store?.close() } catch (_: Exception) {}
+        }
     }
 }

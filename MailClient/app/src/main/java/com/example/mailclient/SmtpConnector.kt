@@ -26,6 +26,12 @@ object SmtpConnector {
                 put("mail.smtp.host", smtpHost)
                 put("mail.smtp.port", smtpPort.toString())
             }
+            val isOAuth = password.startsWith("ya29.") || password.startsWith("1/") || password.startsWith("y0_") || password.length > 30
+            if (isOAuth) {
+                props.put("mail.smtp.sasl.enable", "true")
+                props.put("mail.smtp.auth.mechanisms", "XOAUTH2")
+                props.put("mail.smtp.sasl.mechanisms", "XOAUTH2")
+            }
             val session = Session.getInstance(props)
             val message = MimeMessage(session).apply {
                 setFrom(InternetAddress(fromEmail))
@@ -35,7 +41,12 @@ object SmtpConnector {
             }
 
             val transport = session.getTransport("smtp")
-            transport.connect(smtpHost, smtpPort, fromEmail, password)
+            val authPassword = if (isOAuth) {
+                "user=$fromEmail\u0001auth=Bearer $password\u0001\u0001"
+            } else {
+                password
+            }
+            transport.connect(smtpHost, smtpPort, fromEmail, authPassword)
             transport.sendMessage(message, message.allRecipients)
             transport.close()
 

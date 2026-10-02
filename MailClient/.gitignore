@@ -4,6 +4,7 @@ build/
 */build/
 .gradle/
 out/
+*.continue
 
 # Локальные настройки, специфичные для конкретного компьютера
 local.properties

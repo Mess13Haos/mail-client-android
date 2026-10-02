@@ -28,6 +28,7 @@ import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.BrightnessAuto
 import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.filled.KeyboardArrowLeft
 import androidx.compose.material.icons.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.LightMode
@@ -35,6 +36,14 @@ import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.*
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
+import androidx.compose.foundation.Image
+import android.graphics.BitmapFactory
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
+import java.security.MessageDigest
+import java.net.URL
+import java.net.HttpURLConnection
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -47,6 +56,9 @@ import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import androidx.compose.ui.unit.Dp
 import androidx.compose.foundation.horizontalScroll
 import androidx.activity.compose.BackHandler
 import android.Manifest
@@ -74,6 +86,11 @@ class MainActivity : ComponentActivity() {
             AppRoot()
         }
     }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+    }
 }
 
 data class ComposePrefill(
@@ -84,13 +101,13 @@ data class ComposePrefill(
 
 sealed class Screen {
     object CheckingSavedLogin : Screen()
-    data class Login(val showBack: Boolean = false) : Screen()
     object Mailbox : Screen()
     data class MessageView(val header: ImapConnector.MailHeader) : Screen()
     object FolderList : Screen()
     data class Compose(val prefill: ComposePrefill = ComposePrefill()) : Screen()
     object AccountList : Screen()
     object Settings : Screen()
+    object PasswordLogin : Screen()
 }
 
 private val avatarPalette = listOf(
@@ -108,6 +125,68 @@ private fun avatarLetterFor(text: String): String {
     val nameOnly = text.substringBefore("<").trim()
     val source = nameOnly.ifBlank { text }
     return source.firstOrNull()?.uppercase() ?: "?"
+}
+
+private fun md5(input: String): String {
+    return try {
+        val bytes = MessageDigest.getInstance("MD5").digest(input.trim().lowercase().toByteArray())
+        bytes.joinToString("") { "%02x".format(it) }
+    } catch (e: Exception) {
+        ""
+    }
+}
+
+@Composable
+fun UserAvatar(identifier: String, size: Dp = 40.dp) {
+    val email = if (identifier.contains("@")) ImapConnector.extractEmailAddress(identifier) else identifier
+    var bitmap by remember(email) { mutableStateOf<ImageBitmap?>(null) }
+
+    LaunchedEffect(email) {
+        if (email.contains("@")) {
+            withContext(Dispatchers.IO) {
+                try {
+                    val hash = md5(email)
+                    val urlStr = "https://www.gravatar.com/avatar/$hash?s=200&d=404"
+                    val url = URL(urlStr)
+                    val connection = url.openConnection() as HttpURLConnection
+                    connection.connectTimeout = 2500
+                    connection.readTimeout = 2500
+                    if (connection.responseCode == 200) {
+                        val bmp = BitmapFactory.decodeStream(connection.inputStream)
+                        if (bmp != null) {
+                            bitmap = bmp.asImageBitmap()
+                        }
+                    }
+                } catch (_: Exception) {}
+            }
+        }
+    }
+
+    if (bitmap != null) {
+        Image(
+            bitmap = bitmap!!,
+            contentDescription = email,
+            modifier = Modifier
+                .size(size)
+                .clip(CircleShape),
+            contentScale = ContentScale.Crop
+        )
+    } else {
+        Box(
+            modifier = Modifier
+                .size(size)
+                .clip(CircleShape)
+                .background(avatarColorFor(email)),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                avatarLetterFor(email),
+                color = Color.White,
+                fontWeight = FontWeight.Bold,
+                style = MaterialTheme.typography.bodyMedium
+            )
+        }
+    }
 }
 
 @Composable
@@ -184,7 +263,7 @@ fun AppRoot() {
     LaunchedEffect(Unit) {
         val active = CredentialStore.getActiveAccount(context)
         if (active == null) {
-            screen = Screen.Login()
+            screen = Screen.PasswordLogin
         } else {
             val preset = ImapConnector.presets.firstOrNull { it.label == active.presetLabel }
                 ?: ImapConnector.presets[0]
@@ -214,7 +293,7 @@ fun AppRoot() {
             is Screen.Compose -> screen = Screen.Mailbox
             is Screen.AccountList -> screen = Screen.Mailbox
             is Screen.Settings -> screen = Screen.Mailbox
-            is Screen.Login -> if (current.showBack) screen = Screen.AccountList
+            is Screen.PasswordLogin -> screen = Screen.AccountList
             else -> {}
         }
     }
@@ -232,10 +311,10 @@ fun AppRoot() {
                         Text("Проверка сохранённого входа...")
                     }
                 }
-                is Screen.Login -> LoginScreen(
+
+                is Screen.PasswordLogin -> PasswordLoginScreen(
                     initialError = savedLoginError,
-                    showBack = current.showBack,
-                    onBack = { screen = Screen.AccountList },
+                    onBack = { screen = if (CredentialStore.loadAccounts(context).isEmpty()) Screen.PasswordLogin else Screen.AccountList },
                     onLoginSuccess = { preset, e, pass ->
                         CredentialStore.addOrUpdateAccount(context, preset.label, e, pass)
                         applyAccount(preset, e, pass)
@@ -246,11 +325,6 @@ fun AppRoot() {
                     host = host, port = port, email = email, password = password,
                     folderName = currentFolder,
                     reloadKey = mailboxReloadKey,
-                    themeMode = themeMode,
-                    onToggleTheme = {
-                        themeMode = ThemeStore.nextMode(themeMode)
-                        ThemeStore.setThemeMode(context, themeMode)
-                    },
                     onOpenAccounts = { accountListError = ""; screen = Screen.AccountList },
                     onOpenSettings = { screen = Screen.Settings },
                     onOpenMessage = { header -> screen = Screen.MessageView(header) },
@@ -258,6 +332,11 @@ fun AppRoot() {
                     onCompose = { screen = Screen.Compose() }
                 )
                 is Screen.Settings -> SettingsScreen(
+                    themeMode = themeMode,
+                    onThemeChanged = { newMode ->
+                        themeMode = newMode
+                        ThemeStore.setThemeMode(context, newMode)
+                    },
                     onBack = { screen = Screen.Mailbox }
                 )
                 is Screen.MessageView -> MessageScreen(
@@ -319,14 +398,14 @@ fun AppRoot() {
                             screen = Screen.Mailbox
                         }
                     },
-                    onAddAccount = { screen = Screen.Login(showBack = true) },
+                    onAddAccount = { screen = Screen.PasswordLogin },
                     onRemoveAccount = { account ->
                         CredentialStore.removeAccount(context, account.email)
                         if (account.email.equals(email, ignoreCase = true)) {
                             val next = CredentialStore.getActiveAccount(context)
                             if (next == null) {
                                 email = ""
-                                screen = Screen.Login()
+                                screen = Screen.PasswordLogin
                             } else {
                                 isSwitchingAccount = true
                                 scope.launch {
@@ -345,6 +424,7 @@ fun AppRoot() {
                             }
                         }
                     },
+                    onOpenSettings = { screen = Screen.Settings },
                     onBack = { screen = Screen.Mailbox }
                 )
             }
@@ -352,30 +432,25 @@ fun AppRoot() {
             if (showUpdateDialog && updateInfo != null) {
                 val info = updateInfo!!
                 AlertDialog(
-                    onDismissRequest = { if (!isDownloading) showUpdateDialog = false },
+                    onDismissRequest = { showUpdateDialog = false },
                     title = { Text("Доступно обновление ${info.version}") },
                     text = {
                         Column {
                             if (info.notes.isNotBlank()) {
                                 Text(info.notes)
-                                Spacer(modifier = Modifier.height(8.dp))
-                            }
-                            if (isDownloading) {
-                                Text("Скачивание запущено, следите за уведомлением...")
                             }
                         }
                     },
                     confirmButton = {
                         TextButton(
                             onClick = {
-                                isDownloading = true
+                                showUpdateDialog = false
                                 UpdateChecker.downloadAndInstall(context, info.downloadUrl) {}
-                            },
-                            enabled = !isDownloading
+                            }
                         ) { Text("Скачать и установить") }
                     },
                     dismissButton = {
-                        TextButton(onClick = { showUpdateDialog = false }, enabled = !isDownloading) {
+                        TextButton(onClick = { showUpdateDialog = false }) {
                             Text("Позже")
                         }
                     }
@@ -385,18 +460,23 @@ fun AppRoot() {
     }
 }
 
+
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun LoginScreen(
+fun PasswordLoginScreen(
     initialError: String = "",
-    showBack: Boolean = false,
-    onBack: () -> Unit = {},
+    onBack: () -> Unit,
     onLoginSuccess: (ImapConnector.ServerPreset, String, String) -> Unit
 ) {
     var selectedPreset by remember { mutableStateOf(ImapConnector.presets[0]) }
     var email by remember { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
     var passwordVisible by remember { mutableStateOf(false) }
+    var customHost by remember { mutableStateOf("") }
+    var customPort by remember { mutableStateOf("993") }
+    var customSmtpHost by remember { mutableStateOf("") }
+    var customSmtpPort by remember { mutableStateOf("465") }
     var errorText by remember { mutableStateOf(initialError) }
     var isLoading by remember { mutableStateOf(false) }
     var expanded by remember { mutableStateOf(false) }
@@ -408,15 +488,13 @@ fun LoginScreen(
             .safeDrawingPadding()
             .padding(24.dp)
             .verticalScroll(rememberScrollState()),
-        verticalArrangement = Arrangement.spacedBy(12.dp)
+        verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            if (showBack) {
-                IconButton(onClick = onBack) {
-                    Icon(Icons.Filled.ArrowBack, contentDescription = "Назад")
-                }
+            IconButton(onClick = onBack) {
+                Icon(Icons.Filled.ArrowBack, contentDescription = "Назад")
             }
-            Text("Вход в почту", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+            Text("Войти в почту", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
         }
 
         ExposedDropdownMenuBox(expanded = expanded, onExpandedChange = { expanded = it }) {
@@ -441,6 +519,37 @@ fun LoginScreen(
             }
         }
 
+        if (selectedPreset.label.startsWith("Свой сервер")) {
+            OutlinedTextField(
+                value = customHost,
+                onValueChange = { customHost = it },
+                label = { Text("IMAP Сервер (Входящий)") },
+                shape = RoundedCornerShape(12.dp),
+                modifier = Modifier.fillMaxWidth()
+            )
+            OutlinedTextField(
+                value = customPort,
+                onValueChange = { customPort = it },
+                label = { Text("IMAP Порт") },
+                shape = RoundedCornerShape(12.dp),
+                modifier = Modifier.fillMaxWidth()
+            )
+            OutlinedTextField(
+                value = customSmtpHost,
+                onValueChange = { customSmtpHost = it },
+                label = { Text("SMTP Сервер (Исходящий)") },
+                shape = RoundedCornerShape(12.dp),
+                modifier = Modifier.fillMaxWidth()
+            )
+            OutlinedTextField(
+                value = customSmtpPort,
+                onValueChange = { customSmtpPort = it },
+                label = { Text("SMTP Порт") },
+                shape = RoundedCornerShape(12.dp),
+                modifier = Modifier.fillMaxWidth()
+            )
+        }
+
         OutlinedTextField(
             value = email,
             onValueChange = { email = it },
@@ -452,7 +561,7 @@ fun LoginScreen(
         OutlinedTextField(
             value = password,
             onValueChange = { password = it },
-            label = { Text("Пароль (для Yandex/Mail.ru/Yahoo — пароль приложения)") },
+            label = { Text("Пароль (или пароль приложения)") },
             visualTransformation = if (passwordVisible) VisualTransformation.None else PasswordVisualTransformation(),
             shape = RoundedCornerShape(12.dp),
             trailingIcon = {
@@ -468,12 +577,24 @@ fun LoginScreen(
 
         Button(
             onClick = {
+                val activePreset = if (selectedPreset.label.startsWith("Свой сервер")) {
+                    ImapConnector.ServerPreset(
+                        label = "Свой сервер",
+                        host = customHost.trim(),
+                        port = customPort.toIntOrNull() ?: 993,
+                        smtpHost = customSmtpHost.trim(),
+                        smtpPort = customSmtpPort.toIntOrNull() ?: 465
+                    )
+                } else {
+                    selectedPreset
+                }
+
                 isLoading = true
                 errorText = ""
                 scope.launch {
                     val result = ImapConnector.fetchMessages(
-                        host = selectedPreset.host,
-                        port = selectedPreset.port,
+                        host = activePreset.host,
+                        port = activePreset.port,
                         email = email,
                         password = password,
                         offset = 0
@@ -481,7 +602,7 @@ fun LoginScreen(
                     isLoading = false
                     result.fold(
                         onSuccess = {
-                            onLoginSuccess(selectedPreset, email, password)
+                            onLoginSuccess(activePreset, email, password)
                         },
                         onFailure = { error ->
                             errorText = "Ошибка: ${error.message}"
@@ -511,16 +632,26 @@ fun AccountListScreen(
     onSelectAccount: (CredentialStore.SavedAccount) -> Unit,
     onAddAccount: () -> Unit,
     onRemoveAccount: (CredentialStore.SavedAccount) -> Unit,
+    onOpenSettings: () -> Unit,
     onBack: () -> Unit
 ) {
     var pendingDelete by remember { mutableStateOf<CredentialStore.SavedAccount?>(null) }
 
     Column(modifier = Modifier.fillMaxSize().safeDrawingPadding().padding(16.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            IconButton(onClick = onBack) {
-                Icon(Icons.Filled.ArrowBack, contentDescription = "Назад")
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                IconButton(onClick = onBack) {
+                    Icon(Icons.Filled.ArrowBack, contentDescription = "Назад")
+                }
+                Text("Аккаунты", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
             }
-            Text("Аккаунты", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+            IconButton(onClick = onOpenSettings) {
+                Icon(Icons.Filled.Settings, contentDescription = "Настройки")
+            }
         }
 
         if (isBusy) {
@@ -554,15 +685,7 @@ fun AccountListScreen(
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Box(
-                            modifier = Modifier
-                                .size(40.dp)
-                                .clip(CircleShape)
-                                .background(avatarColorFor(account.email)),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Text(avatarLetterFor(account.email), color = Color.White, fontWeight = FontWeight.Bold)
-                        }
+                        UserAvatar(account.email, size = 40.dp)
                         Spacer(modifier = Modifier.width(12.dp))
                         Column(modifier = Modifier.weight(1f)) {
                             Text(
@@ -622,8 +745,6 @@ fun MailboxScreen(
     password: String,
     folderName: String,
     reloadKey: Int,
-    themeMode: ThemeStore.ThemeMode,
-    onToggleTheme: () -> Unit,
     onOpenAccounts: () -> Unit,
     onOpenSettings: () -> Unit,
     onOpenMessage: (ImapConnector.MailHeader) -> Unit,
@@ -637,11 +758,13 @@ fun MailboxScreen(
     var isLoading by remember { mutableStateOf(false) }
     var errorText by remember { mutableStateOf("") }
     var selectedMailForMenu by remember { mutableStateOf<ImapConnector.MailHeader?>(null) }
+    var showClearConfirm by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     val pageSize = 20
 
     val leftGesture = remember { ThemeStore.getLeftGesture(context) }
     val rightGesture = remember { ThemeStore.getRightGesture(context) }
+    val isSpamOrTrash = ImapConnector.isTrashFolder(folderName) || ImapConnector.isSpamFolder(folderName)
 
     fun loadPage(newOffset: Int) {
         isLoading = true
@@ -701,49 +824,56 @@ fun MailboxScreen(
         }
     }
 
-    val themeIcon = when (themeMode) {
-        ThemeStore.ThemeMode.SYSTEM -> Icons.Filled.BrightnessAuto
-        ThemeStore.ThemeMode.LIGHT -> Icons.Filled.LightMode
-        ThemeStore.ThemeMode.DARK -> Icons.Filled.DarkMode
-    }
-    val themeDescription = when (themeMode) {
-        ThemeStore.ThemeMode.SYSTEM -> "Тема: системная"
-        ThemeStore.ThemeMode.LIGHT -> "Тема: светлая"
-        ThemeStore.ThemeMode.DARK -> "Тема: тёмная"
-    }
-
     Scaffold(
         contentWindowInsets = WindowInsets.safeDrawing,
         topBar = {
-            TopAppBar(
-                title = {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(
-                            email,
-                            style = MaterialTheme.typography.bodyMedium,
-                            fontWeight = FontWeight.SemiBold,
-                            maxLines = 1
-                        )
-                        TextButton(onClick = onOpenFolders, contentPadding = PaddingValues(start = 4.dp)) {
-                            Text("· ${ImapConnector.displayNameFor(folderName)} ▾", style = MaterialTheme.typography.bodySmall)
+            Surface(
+                color = MaterialTheme.colorScheme.surface,
+                tonalElevation = 3.dp
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .statusBarsPadding()
+                        .padding(horizontal = 16.dp, vertical = 8.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Text(
+                        email,
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    Spacer(modifier = Modifier.height(2.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        TextButton(
+                            onClick = onOpenFolders,
+                            contentPadding = PaddingValues(0.dp)
+                        ) {
+                            Text(
+                                "${ImapConnector.displayNameFor(folderName)} ▾",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            if (isSpamOrTrash) {
+                                IconButton(onClick = { showClearConfirm = true }) {
+                                    Icon(Icons.Filled.DeleteSweep, contentDescription = "Очистить папку")
+                                }
+                            }
+                            IconButton(onClick = onOpenAccounts) {
+                                Icon(Icons.Filled.AccountCircle, contentDescription = "Аккаунты")
+                            }
                         }
                     }
-                },
-                actions = {
-                    IconButton(onClick = onToggleTheme) {
-                        Icon(themeIcon, contentDescription = themeDescription)
-                    }
-                    IconButton(onClick = onOpenSettings) {
-                        Icon(Icons.Filled.Settings, contentDescription = "Настройки")
-                    }
-                    IconButton(onClick = onOpenAccounts) {
-                        Icon(Icons.Filled.AccountCircle, contentDescription = "Аккаунты")
-                    }
-                },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.surface
-                )
-            )
+                }
+            }
         }
     ) { innerPadding ->
         Column(modifier = Modifier.fillMaxSize().padding(innerPadding).padding(horizontal = 12.dp)) {
@@ -823,15 +953,7 @@ fun MailboxScreen(
                                     modifier = Modifier.fillMaxWidth().padding(12.dp),
                                     verticalAlignment = Alignment.Top
                                 ) {
-                                    Box(
-                                        modifier = Modifier
-                                            .size(40.dp)
-                                            .clip(CircleShape)
-                                            .background(avatarColorFor(mail.from)),
-                                        contentAlignment = Alignment.Center
-                                    ) {
-                                        Text(avatarLetterFor(mail.from), color = Color.White, fontWeight = FontWeight.Bold)
-                                    }
+                                    UserAvatar(mail.from, size = 40.dp)
                                     Spacer(modifier = Modifier.width(12.dp))
                                     Column(modifier = Modifier.weight(1f)) {
                                         Text(mail.from, fontWeight = FontWeight.Bold, maxLines = 1)
@@ -934,6 +1056,27 @@ fun MailboxScreen(
             }
         )
     }
+
+    if (showClearConfirm) {
+        AlertDialog(
+            onDismissRequest = { showClearConfirm = false },
+            title = { Text("Очистить папку?") },
+            text = { Text("Все письма в папке «${ImapConnector.displayNameFor(folderName)}» будут удалены.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    showClearConfirm = false
+                    scope.launch {
+                        isLoading = true
+                        ImapConnector.clearFolder(host, port, email, password, folderName)
+                        loadPage(0)
+                    }
+                }) { Text("Очистить", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = {
+                TextButton(onClick = { showClearConfirm = false }) { Text("Отмена") }
+            }
+        )
+    }
 }
 
 private enum class PendingAction { NONE, DELETE, SPAM, MOVE, RESTORE }
@@ -982,6 +1125,13 @@ fun MessageScreen(
     var pendingAction by remember { mutableStateOf(PendingAction.NONE) }
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
+
+    LaunchedEffect(errorText) {
+        if (errorText.isNotEmpty()) {
+            Toast.makeText(context, errorText, Toast.LENGTH_LONG).show()
+        }
+    }
+
     val isBusy = pendingAction != PendingAction.NONE
 
     LaunchedEffect(header.msgNum) {
@@ -1319,14 +1469,26 @@ fun FolderListScreen(
     onBack: () -> Unit
 ) {
     var folders by remember { mutableStateOf(listOf<String>()) }
+    var folderCounts by remember { mutableStateOf(mapOf<String, Pair<Int, Int>>()) }
     var isLoading by remember { mutableStateOf(true) }
     var errorText by remember { mutableStateOf("") }
+    val scope = rememberCoroutineScope()
 
     LaunchedEffect(Unit) {
         val result = ImapConnector.listFolders(host, port, email, password)
         isLoading = false
         result.fold(
-            onSuccess = { folders = it },
+            onSuccess = { list ->
+                folders = list
+                val counts = mutableMapOf<String, Pair<Int, Int>>()
+                list.forEach { folder ->
+                    val res = ImapConnector.fetchFolderCounts(host, port, email, password, folder)
+                    res.onSuccess { pair ->
+                        counts[folder] = pair
+                    }
+                }
+                folderCounts = counts
+            },
             onFailure = { errorText = "Ошибка: ${it.message}" }
         )
     }
@@ -1399,11 +1561,24 @@ fun FolderListScreen(
                         modifier = Modifier.fillMaxWidth().clickable { onSelectFolder(folder) },
                         shape = RoundedCornerShape(12.dp)
                     ) {
-                        Text(
-                            ImapConnector.displayNameFor(folder),
+                        Row(
                             modifier = Modifier.fillMaxWidth().padding(14.dp),
-                            fontWeight = FontWeight.SemiBold
-                        )
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                ImapConnector.displayNameFor(folder),
+                                fontWeight = FontWeight.SemiBold
+                            )
+                            val count = folderCounts[folder]
+                            if (count != null) {
+                                Text(
+                                    text = "${count.first} / ${count.second}",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = if (count.first > 0) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
                     }
                 }
                 if (folder.equals("INBOX", ignoreCase = true)) {
@@ -1418,11 +1593,24 @@ fun FolderListScreen(
                                 containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
                             )
                         ) {
-                            Text(
-                                ImapConnector.displayNameFor(sub),
+                            Row(
                                 modifier = Modifier.fillMaxWidth().padding(12.dp),
-                                style = MaterialTheme.typography.bodyMedium
-                            )
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    ImapConnector.displayNameFor(sub),
+                                    style = MaterialTheme.typography.bodyMedium
+                                )
+                                val count = folderCounts[sub]
+                                if (count != null) {
+                                    Text(
+                                        text = "${count.first} / ${count.second}",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = if (count.first > 0) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
                         }
                     }
                 }
@@ -1563,6 +1751,8 @@ private fun getMimeTypeForFile(fileName: String): String {
 
 @Composable
 fun SettingsScreen(
+    themeMode: ThemeStore.ThemeMode,
+    onThemeChanged: (ThemeStore.ThemeMode) -> Unit,
     onBack: () -> Unit
 ) {
     val context = LocalContext.current
@@ -1593,7 +1783,8 @@ fun SettingsScreen(
         modifier = Modifier
             .fillMaxSize()
             .safeDrawingPadding()
-            .padding(16.dp),
+            .padding(16.dp)
+            .verticalScroll(rememberScrollState()),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1604,6 +1795,41 @@ fun SettingsScreen(
         }
 
         Spacer(modifier = Modifier.height(4.dp))
+
+        Text("Тема оформления", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+        val themeLabel = when (themeMode) {
+            ThemeStore.ThemeMode.SYSTEM -> "Системная"
+            ThemeStore.ThemeMode.LIGHT -> "Светлая"
+            ThemeStore.ThemeMode.DARK -> "Тёмная"
+        }
+        val themeIcon = when (themeMode) {
+            ThemeStore.ThemeMode.SYSTEM -> Icons.Filled.BrightnessAuto
+            ThemeStore.ThemeMode.LIGHT -> Icons.Filled.LightMode
+            ThemeStore.ThemeMode.DARK -> Icons.Filled.DarkMode
+        }
+        ElevatedCard(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(14.dp)) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable {
+                        val next = ThemeStore.nextMode(themeMode)
+                        ThemeStore.setThemeMode(context, next)
+                        onThemeChanged(next)
+                    }
+                    .padding(16.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("Тема оформления", fontWeight = FontWeight.SemiBold)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(themeLabel, color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.bodyMedium)
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Icon(themeIcon, contentDescription = themeLabel, tint = MaterialTheme.colorScheme.primary)
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(8.dp))
 
         Text("Жесты", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
         ElevatedCard(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(14.dp)) {
