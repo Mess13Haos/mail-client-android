@@ -1,3 +1,6 @@
 <resources>
     <string name="app_name">Mail Client</string>
+    <string name="monitoring_service_channel_name">Фоновый мониторинг почты</string>
+    <string name="monitoring_service_title">Мониторинг почтовых ящиков</string>
+    <string name="monitoring_service_text">Отслеживание новых писем по IMAP IDLE</string>
 </resources>

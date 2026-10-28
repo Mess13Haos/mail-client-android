@@ -28,19 +28,20 @@ object UpdateChecker {
     )
 
     suspend fun checkForUpdate(currentVersion: String): Result<ReleaseInfo?> = withContext(Dispatchers.IO) {
+        var connection: HttpURLConnection? = null
         try {
-            val connection = URL(API_URL).openConnection() as HttpURLConnection
-            connection.setRequestProperty("Accept", "application/vnd.github+json")
-            connection.setRequestProperty("User-Agent", "MailClientApp")
-            connection.connectTimeout = 10000
-            connection.readTimeout = 10000
+            connection = URL(API_URL).openConnection() as HttpURLConnection
+            connection!!.setRequestProperty("Accept", "application/vnd.github+json")
+            connection!!.setRequestProperty("User-Agent", "MailClientApp")
+            connection!!.connectTimeout = 10000
+            connection!!.readTimeout = 10000
 
-            val responseCode = connection.responseCode
+            val responseCode = connection!!.responseCode
             if (responseCode != 200) {
                 return@withContext Result.failure(Exception("GitHub вернул код $responseCode"))
             }
 
-            val text = connection.inputStream.bufferedReader().readText()
+            val text = connection!!.inputStream.bufferedReader().use { it.readText() }
             val json = JSONObject(text)
 
             val tagName = json.getString("tag_name")
@@ -70,6 +71,8 @@ object UpdateChecker {
             }
         } catch (e: Exception) {
             Result.failure(e)
+        } finally {
+            try { connection?.disconnect() } catch (_: Exception) {}
         }
     }
 

@@ -62,7 +62,6 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.foundation.horizontalScroll
 import androidx.activity.compose.BackHandler
 import android.Manifest
-import android.app.NotificationManager
 import android.content.ContentValues
 import android.content.pm.PackageManager
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -77,19 +76,22 @@ import android.provider.MediaStore
 import android.webkit.MimeTypeMap
 import android.widget.Toast
 import java.io.File
+import kotlinx.coroutines.flow.MutableStateFlow
 
 class MainActivity : ComponentActivity() {
+    private val incomingIntent = MutableStateFlow<Intent?>(null)
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        incomingIntent.value = intent
         enableEdgeToEdge()
-        setContent {
-            AppRoot()
-        }
+        setContent { AppRoot(incomingIntent) }
     }
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
+        incomingIntent.value = intent
     }
 }
 
@@ -152,7 +154,7 @@ fun UserAvatar(identifier: String, size: Dp = 40.dp) {
                     connection.connectTimeout = 2500
                     connection.readTimeout = 2500
                     if (connection.responseCode == 200) {
-                        val bmp = BitmapFactory.decodeStream(connection.inputStream)
+                        val bmp = connection.inputStream.use { BitmapFactory.decodeStream(it) }
                         if (bmp != null) {
                             bitmap = bmp.asImageBitmap()
                         }
@@ -190,8 +192,9 @@ fun UserAvatar(identifier: String, size: Dp = 40.dp) {
 }
 
 @Composable
-fun AppRoot() {
+fun AppRoot(incomingIntent: kotlinx.coroutines.flow.StateFlow<Intent?>) {
     val context = LocalContext.current
+    val activityIntent by incomingIntent.collectAsState()
     val notificationPermissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { }
@@ -205,22 +208,27 @@ fun AppRoot() {
                 notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
             }
         }
-        val workRequest = PeriodicWorkRequestBuilder<MailCheckWorker>(15, TimeUnit.MINUTES).build()
+        val workRequest = PeriodicWorkRequestBuilder<MailCheckWorker>(
+            MailNotificationState.CHECK_INTERVAL_MINUTES, TimeUnit.MINUTES
+        ).build()
         WorkManager.getInstance(context).enqueueUniquePeriodicWork(
             "mail_check_worker",
-            androidx.work.ExistingPeriodicWorkPolicy.KEEP,
+            androidx.work.ExistingPeriodicWorkPolicy.UPDATE,
             workRequest
         )
+        if (CredentialStore.loadAccounts(context).isNotEmpty()) {
+            ImapIdleService.start(context)
+        }
     }
     var screen by remember { mutableStateOf<Screen>(Screen.CheckingSavedLogin) }
     var host by remember { mutableStateOf("") }
-    var port by remember { mutableStateOf(993) }
+    var port by remember { mutableIntStateOf(993) }
     var smtpHost by remember { mutableStateOf("") }
-    var smtpPort by remember { mutableStateOf(465) }
+    var smtpPort by remember { mutableIntStateOf(465) }
     var email by remember { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
     var currentFolder by remember { mutableStateOf("INBOX") }
-    var mailboxReloadKey by remember { mutableStateOf(0) }
+    var mailboxReloadKey by remember { mutableIntStateOf(0) }
     var savedLoginError by remember { mutableStateOf("") }
     var accountListError by remember { mutableStateOf("") }
     var isSwitchingAccount by remember { mutableStateOf(false) }
@@ -237,20 +245,20 @@ fun AppRoot() {
     }
     val colorScheme = if (useDarkTheme) darkColorScheme() else lightColorScheme()
 
-    fun applyAccount(preset: ImapConnector.ServerPreset, e: String, pass: String) {
+    fun applyAccount(
+        preset: ImapConnector.ServerPreset,
+        e: String,
+        pass: String,
+        folder: String = "INBOX"
+    ) {
         host = preset.host; port = preset.port
         smtpHost = preset.smtpHost; smtpPort = preset.smtpPort
         email = e; password = pass
-        currentFolder = "INBOX"
+        currentFolder = folder
         mailboxReloadKey++
     }
 
     LaunchedEffect(Unit) {
-        try {
-            val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-            notificationManager.cancelAll()
-        } catch (_: Exception) {}
-
         val result = UpdateChecker.checkForUpdate(BuildConfig.VERSION_NAME)
         result.onSuccess { info ->
             if (info != null) {
@@ -260,12 +268,18 @@ fun AppRoot() {
         }
     }
 
-    LaunchedEffect(Unit) {
-        val intent = (context as? ComponentActivity)?.intent
-        val targetEmail = intent?.getStringExtra("target_email")
+    LaunchedEffect(activityIntent) {
+        val oneTimeWorker = androidx.work.OneTimeWorkRequestBuilder<MailCheckWorker>().build()
+        WorkManager.getInstance(context).enqueue(oneTimeWorker)
 
-        val active = if (!targetEmail.isNullOrBlank()) {
-            CredentialStore.setActiveEmail(context, targetEmail)
+        val target = MailNotificationState.target(
+            activityIntent?.getStringExtra("target_email"),
+            activityIntent?.getLongExtra("target_uid", -1L) ?: -1L,
+            activityIntent?.getStringExtra("target_folder")
+        )
+
+        val active = if (target != null) {
+            CredentialStore.setActiveEmail(context, target.email)
             CredentialStore.getActiveAccount(context)
         } else {
             CredentialStore.getActiveAccount(context)
@@ -280,20 +294,61 @@ fun AppRoot() {
                 it.label.startsWith(active.presetLabel, ignoreCase = true)
             } ?: ImapConnector.presets.firstOrNull { it.label.startsWith("Свой сервер") } ?: ImapConnector.presets[0]
 
-            val result = ImapConnector.fetchMessages(
-                host = preset.host, port = preset.port,
-                email = active.email, password = active.password, offset = 0
-            )
-            result.fold(
-                onSuccess = {
-                    applyAccount(preset, active.email, active.password)
-                    screen = Screen.Mailbox
-                },
-                onFailure = {
-                    savedLoginError = "Не удалось войти в ${active.email}: ${it.message}"
-                    screen = Screen.AccountList
-                }
-            )
+            if (target != null) {
+                val headerResult = ImapConnector.fetchHeaderByUid(
+                    preset.host, preset.port, active.email, active.password, target.uid, target.folder
+                )
+                headerResult.fold(
+                    onSuccess = { header ->
+                        applyAccount(preset, active.email, active.password, target.folder)
+                        val readResult = ImapConnector.markAsReadByUid(
+                            preset.host, preset.port, active.email, active.password, target.uid, target.folder
+                        )
+                        if (readResult.isSuccess) {
+                            NotificationHelper.dismissNotification(context, active.email, target.uid)
+                        } else {
+                            Toast.makeText(
+                                context,
+                                "Не удалось отметить письмо прочитанным: ${readResult.exceptionOrNull()?.message}",
+                                Toast.LENGTH_LONG
+                            ).show()
+                        }
+                        screen = Screen.MessageView(header)
+                    },
+                    onFailure = {
+                        val result = ImapConnector.fetchMessages(
+                            host = preset.host, port = preset.port,
+                            email = active.email, password = active.password, offset = 0,
+                            folderName = target.folder
+                        )
+                        result.fold(
+                            onSuccess = {
+                                applyAccount(preset, active.email, active.password, target.folder)
+                                screen = Screen.Mailbox
+                            },
+                            onFailure = {
+                                savedLoginError = "Не удалось войти в ${active.email}: ${it.message}"
+                                screen = Screen.AccountList
+                            }
+                        )
+                    }
+                )
+            } else {
+                val result = ImapConnector.fetchMessages(
+                    host = preset.host, port = preset.port,
+                    email = active.email, password = active.password, offset = 0
+                )
+                result.fold(
+                    onSuccess = {
+                        applyAccount(preset, active.email, active.password)
+                        screen = Screen.Mailbox
+                    },
+                    onFailure = {
+                        savedLoginError = "Не удалось войти в ${active.email}: ${it.message}"
+                        screen = Screen.AccountList
+                    }
+                )
+            }
         }
     }
 
@@ -330,6 +385,7 @@ fun AppRoot() {
                     onBack = { screen = if (CredentialStore.loadAccounts(context).isEmpty()) Screen.PasswordLogin else Screen.AccountList },
                     onLoginSuccess = { preset, e, pass ->
                         CredentialStore.addOrUpdateAccount(context, preset.label, e, pass)
+                        ImapIdleService.start(context)
                         applyAccount(preset, e, pass)
                         screen = Screen.Mailbox
                     }
@@ -765,8 +821,8 @@ fun MailboxScreen(
     onCompose: () -> Unit
 ) {
     val context = LocalContext.current
-    var offset by remember { mutableStateOf(0) }
-    var totalCount by remember { mutableStateOf(0) }
+    var offset by remember { mutableIntStateOf(0) }
+    var totalCount by remember { mutableIntStateOf(0) }
     var messages by remember { mutableStateOf(listOf<ImapConnector.MailHeader>()) }
     var isLoading by remember { mutableStateOf(false) }
     var errorText by remember { mutableStateOf("") }
@@ -778,13 +834,6 @@ fun MailboxScreen(
     val leftGesture = remember { ThemeStore.getLeftGesture(context) }
     val rightGesture = remember { ThemeStore.getRightGesture(context) }
     val isSpamOrTrash = ImapConnector.isTrashFolder(folderName) || ImapConnector.isSpamFolder(folderName)
-
-    LaunchedEffect(email) {
-        try {
-            val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-            notificationManager.cancelAll()
-        } catch (_: Exception) {}
-    }
 
     fun loadPage(newOffset: Int) {
         isLoading = true
@@ -1500,14 +1549,8 @@ fun FolderListScreen(
         result.fold(
             onSuccess = { list ->
                 folders = list
-                val counts = mutableMapOf<String, Pair<Int, Int>>()
-                list.forEach { folder ->
-                    val res = ImapConnector.fetchFolderCounts(host, port, email, password, folder)
-                    res.onSuccess { pair ->
-                        counts[folder] = pair
-                    }
-                }
-                folderCounts = counts
+                val batchRes = ImapConnector.fetchFolderCountsBatch(host, port, email, password, list)
+                folderCounts = batchRes.getOrDefault(emptyMap())
             },
             onFailure = { errorText = "Ошибка: ${it.message}" }
         )

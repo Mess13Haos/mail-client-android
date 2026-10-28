@@ -1,6 +1,7 @@
 package com.example.mailclient
 
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
 import java.util.Properties
 import javax.mail.FetchProfile
@@ -26,7 +27,245 @@ object ImapConnector {
         val smtpPort: Int
     )
 
-    data class NewMailInfo(val uid: Long, val from: String, val subject: String)
+    data class NewMailInfo(
+        val uid: Long,
+        val from: String,
+        val subject: String,
+        val messageId: String = "",
+        val sentDateMs: Long = 0L,
+        val sizeBytes: Long = 0L
+    ) {
+        fun stableId(): String {
+            val cleanMsgId = messageId.trim()
+            return if (cleanMsgId.isNotBlank()) {
+                "msgid:$cleanMsgId"
+            } else {
+                val cleanFrom = from.trim().lowercase().replace("%", "%25").replace("|", "%7C")
+                val cleanSubj = subject.trim().lowercase().replace("%", "%25").replace("|", "%7C")
+                "composite:$cleanFrom|$cleanSubj|$sentDateMs|$sizeBytes"
+            }
+        }
+    }
+
+    data class UnreadInboxResult(
+        val unseenMessages: List<NewMailInfo>,
+        val uidValidity: Long
+    )
+
+    data class MailMessageInfo(
+        val uid: Long,
+        val from: String,
+        val subject: String,
+        val messageId: String = "",
+        val sentDateMs: Long = 0L,
+        val sizeBytes: Long = 0L,
+        val isSeen: Boolean = false
+    )
+
+    interface FolderHandle : AutoCloseable {
+        fun getUIDValidity(): Long
+        fun getMessageCount(): Int
+        fun getMessages(lowIndex: Int, highIndex: Int): List<MailMessageInfo>
+        fun searchUnread(): List<MailMessageInfo> = emptyList()
+        fun getMessagesByUID(sinceUid: Long): Pair<List<MailMessageInfo>, Long> = Pair(emptyList(), sinceUid)
+    }
+
+    interface ImapFolderAdapter {
+        fun openFolder(host: String, port: Int, email: String, password: String, folderName: String): FolderHandle
+    }
+
+    class JavaMailFolderAdapter : ImapFolderAdapter {
+        override fun openFolder(host: String, port: Int, email: String, password: String, folderName: String): FolderHandle {
+            val store = openStore(host, port, email, password)
+            val folder = store.getFolder(folderName)
+            folder.open(Folder.READ_ONLY)
+            val uidFolder = folder as UIDFolder
+            return object : FolderHandle {
+                override fun getUIDValidity(): Long = uidFolder.getUIDValidity()
+                override fun getMessageCount(): Int = folder.messageCount
+                override fun getMessages(lowIndex: Int, highIndex: Int): List<MailMessageInfo> {
+                    val rawMessages = folder.getMessages(lowIndex, highIndex)
+                    val fetchProfile = FetchProfile().apply {
+                        add(FetchProfile.Item.ENVELOPE)
+                        add(FetchProfile.Item.FLAGS)
+                    }
+                    folder.fetch(rawMessages, fetchProfile)
+                    return rawMessages.mapNotNull { msg ->
+                        val uid = try { uidFolder.getUID(msg) } catch (_: Exception) { 0L }
+                        if (uid > 0L) {
+                            val msgId = try { msg.getHeader("Message-ID")?.firstOrNull() ?: "" } catch (_: Exception) { "" }
+                            val sentDate = try { msg.sentDate?.time ?: 0L } catch (_: Exception) { 0L }
+                            val size = try { msg.size.toLong() } catch (_: Exception) { 0L }
+                            val isSeen = try { msg.isSet(Flags.Flag.SEEN) } catch (_: Exception) { false }
+                            MailMessageInfo(
+                                uid = uid,
+                                from = msg.from?.joinToString(", ") { it.toString() } ?: "(неизвестно)",
+                                subject = msg.subject ?: "(без темы)",
+                                messageId = msgId,
+                                sentDateMs = sentDate,
+                                sizeBytes = size,
+                                isSeen = isSeen
+                            )
+                        } else null
+                    }
+                }
+
+                override fun searchUnread(): List<MailMessageInfo> {
+                    val unseenMessages = folder.search(javax.mail.search.FlagTerm(Flags(Flags.Flag.SEEN), false))
+                    val fetchProfile = FetchProfile().apply {
+                        add(FetchProfile.Item.ENVELOPE)
+                        add(FetchProfile.Item.FLAGS)
+                    }
+                    folder.fetch(unseenMessages, fetchProfile)
+                    return unseenMessages.mapNotNull { msg ->
+                        val uid = try { uidFolder.getUID(msg) } catch (_: Exception) { 0L }
+                        if (uid > 0L) {
+                            val msgId = try { msg.getHeader("Message-ID")?.firstOrNull() ?: "" } catch (_: Exception) { "" }
+                            val sentDate = try { msg.sentDate?.time ?: 0L } catch (_: Exception) { 0L }
+                            val size = try { msg.size.toLong() } catch (_: Exception) { 0L }
+                            val isSeen = try { msg.isSet(Flags.Flag.SEEN) } catch (_: Exception) { false }
+                            MailMessageInfo(
+                                uid = uid,
+                                from = msg.from?.joinToString(", ") { it.toString() } ?: "(неизвестно)",
+                                subject = msg.subject ?: "(без темы)",
+                                messageId = msgId,
+                                sentDateMs = sentDate,
+                                sizeBytes = size,
+                                isSeen = isSeen
+                            )
+                        } else null
+                    }
+                }
+
+                override fun getMessagesByUID(sinceUid: Long): Pair<List<MailMessageInfo>, Long> {
+                    val currentHighestUid = uidFolder.getUIDNext() - 1
+                    if (sinceUid <= 0 || currentHighestUid <= sinceUid) {
+                        return Pair(emptyList(), maxOf(0L, currentHighestUid))
+                    }
+                    val newMessages = uidFolder.getMessagesByUID(sinceUid + 1, UIDFolder.LASTUID)
+                    val fetchProfile = FetchProfile().apply {
+                        add(FetchProfile.Item.ENVELOPE)
+                    }
+                    folder.fetch(newMessages, fetchProfile)
+                    val infos = newMessages.mapNotNull { msg ->
+                        val uid = try { uidFolder.getUID(msg) } catch (_: Exception) { 0L }
+                        if (uid > sinceUid) {
+                            val msgId = try { msg.getHeader("Message-ID")?.firstOrNull() ?: "" } catch (_: Exception) { "" }
+                            val sentDate = try { msg.sentDate?.time ?: 0L } catch (_: Exception) { 0L }
+                            val size = try { msg.size.toLong() } catch (_: Exception) { 0L }
+                            MailMessageInfo(
+                                uid = uid,
+                                from = msg.from?.joinToString(", ") { it.toString() } ?: "(неизвестно)",
+                                subject = msg.subject ?: "(без темы)",
+                                messageId = msgId,
+                                sentDateMs = sentDate,
+                                sizeBytes = size,
+                                isSeen = false
+                            )
+                        } else null
+                    }
+                    return Pair(infos, currentHighestUid)
+                }
+
+                override fun close() {
+                    try { folder.close(false) } catch (_: Exception) {}
+                    try { store.close() } catch (_: Exception) {}
+                }
+            }
+        }
+    }
+
+    @set:org.jetbrains.annotations.TestOnly
+    var folderAdapter: ImapFolderAdapter = JavaMailFolderAdapter()
+
+    suspend fun fetchFolderMessagesFullScan(
+        host: String, port: Int, email: String, password: String, folderName: String = "INBOX"
+    ): Result<UnreadInboxResult> = withContext(Dispatchers.IO) {
+        var handle: FolderHandle? = null
+        try {
+            handle = folderAdapter.openFolder(host, port, email, password, folderName)
+            val initialUidValidity = handle.getUIDValidity()
+            if (initialUidValidity <= 0L) {
+                return@withContext Result.failure(Exception("Server returned invalid UIDVALIDITY"))
+            }
+
+            val total = handle.getMessageCount()
+            if (total <= 0) {
+                return@withContext Result.success(UnreadInboxResult(emptyList(), initialUidValidity))
+            }
+
+            val batchSize = 100
+            var highIndex = total
+            val allMessages = mutableListOf<NewMailInfo>()
+
+            while (highIndex >= 1) {
+                val lowIndex = maxOf(1, highIndex - batchSize + 1)
+                val rawMessages = handle.getMessages(lowIndex, highIndex)
+
+                for (msg in rawMessages) {
+                    if (msg.uid > 0L) {
+                        allMessages.add(
+                            NewMailInfo(
+                                uid = msg.uid,
+                                from = decodeMimeWords(msg.from),
+                                subject = decodeMimeWords(msg.subject),
+                                messageId = msg.messageId,
+                                sentDateMs = msg.sentDateMs,
+                                sizeBytes = msg.sizeBytes
+                            )
+                        )
+                    }
+                }
+                highIndex = lowIndex - 1
+            }
+
+            val finalUidValidity = try { handle.getUIDValidity() } catch (_: Exception) { 0L }
+            if (finalUidValidity != initialUidValidity || finalUidValidity <= 0L) {
+                return@withContext Result.failure(Exception("UIDVALIDITY changed during full folder scan"))
+            }
+
+            Result.success(UnreadInboxResult(allMessages, initialUidValidity))
+        } catch (e: Exception) {
+            Log.e("MailClient", "Error in fetchFolderMessagesFullScan for $email", e)
+            Result.failure(e)
+        } finally {
+            try { handle?.close() } catch (_: Exception) {}
+        }
+    }
+
+    suspend fun fetchUnreadInboxMessages(
+        host: String, port: Int, email: String, password: String
+    ): Result<UnreadInboxResult> = withContext(Dispatchers.IO) {
+        var handle: FolderHandle? = null
+        try {
+            handle = folderAdapter.openFolder(host, port, email, password, "INBOX")
+            val uidValidity = handle.getUIDValidity()
+            if (uidValidity <= 0L) {
+                return@withContext Result.failure(Exception("Server returned invalid UIDVALIDITY"))
+            }
+
+            val unseenMessages = handle.searchUnread()
+            val list = unseenMessages.mapNotNull { msg ->
+                if (msg.uid > 0L) {
+                    NewMailInfo(
+                        uid = msg.uid,
+                        from = decodeMimeWords(msg.from),
+                        subject = decodeMimeWords(msg.subject),
+                        messageId = msg.messageId,
+                        sentDateMs = msg.sentDateMs,
+                        sizeBytes = msg.sizeBytes
+                    )
+                } else null
+            }
+
+            Result.success(UnreadInboxResult(list, uidValidity))
+        } catch (e: Exception) {
+            Log.e("MailClient", "Error in fetchUnreadInboxMessages for $email", e)
+            Result.failure(e)
+        } finally {
+            try { handle?.close() } catch (_: Exception) {}
+        }
+    }
 
     suspend fun fetchNewInboxMail(
         host: String,
@@ -35,40 +274,113 @@ object ImapConnector {
         password: String,
         sinceUid: Long
     ): Result<Pair<List<NewMailInfo>, Long>> = withContext(Dispatchers.IO) {
-        var store: Store? = null
-        var folder: Folder? = null
+        var handle: FolderHandle? = null
         try {
-            store = openStore(host, port, email, password)
-            folder = store.getFolder("INBOX")
-            folder.open(Folder.READ_ONLY)
-            val uidFolder = folder as UIDFolder
-
-            val currentHighestUid = uidFolder.getUIDNext() - 1
-
-            if (sinceUid <= 0) {
-                return@withContext Result.success(Pair(emptyList(), currentHighestUid))
-            }
-            if (currentHighestUid <= sinceUid) {
-                return@withContext Result.success(Pair(emptyList(), sinceUid))
-            }
-
-            val newMessages = uidFolder.getMessagesByUID(sinceUid + 1, UIDFolder.LASTUID)
-            val fetchProfile = FetchProfile()
-            fetchProfile.add(FetchProfile.Item.ENVELOPE)
-            folder.fetch(newMessages, fetchProfile)
+            handle = folderAdapter.openFolder(host, port, email, password, "INBOX")
+            val (newMessages, currentHighestUid) = handle.getMessagesByUID(sinceUid)
 
             val infos = newMessages.mapNotNull { msg ->
-                val uid = uidFolder.getUID(msg)
-                if (uid > sinceUid) {
+                if (msg.uid > sinceUid) {
                     NewMailInfo(
-                        uid = uid,
-                        from = decodeMimeWords(msg.from?.joinToString(", ") { it.toString() } ?: "(неизвестно)"),
-                        subject = decodeMimeWords(msg.subject ?: "(без темы)")
+                        uid = msg.uid,
+                        from = decodeMimeWords(msg.from),
+                        subject = decodeMimeWords(msg.subject),
+                        messageId = msg.messageId,
+                        sentDateMs = msg.sentDateMs,
+                        sizeBytes = msg.sizeBytes
                     )
                 } else null
             }
 
             Result.success(Pair(infos, currentHighestUid))
+        } catch (e: Exception) {
+            Result.failure(e)
+        } finally {
+            try { handle?.close() } catch (_: Exception) {}
+        }
+    }
+
+    suspend fun listenIdleForAccount(
+        host: String,
+        port: Int,
+        email: String,
+        password: String,
+        onNewMailArrived: suspend (Long) -> Unit
+    ): Boolean = withContext(Dispatchers.IO) {
+        var store: Store? = null
+        var folder: Folder? = null
+        try {
+            store = openStore(host, port, email, password, isIdle = true)
+            folder = store.getFolder("INBOX")
+            folder.open(Folder.READ_ONLY)
+
+            val imapFolder = folder as? com.sun.mail.imap.IMAPFolder
+            val imapStore = store as? com.sun.mail.imap.IMAPStore
+            if (imapFolder == null || imapStore == null || !imapStore.hasCapability("IDLE")) {
+                Log.w("ImapConnector", "IDLE not supported for $email on $host")
+                try { folder.close(false) } catch (_: Exception) {}
+                try { store.close() } catch (_: Exception) {}
+                return@withContext false
+            }
+
+            val uidFolder = folder as UIDFolder
+            val currentUidValidity = try { uidFolder.getUIDValidity() } catch (_: Exception) { 0L }
+
+            var hasNewMail = false
+            val listener = object : javax.mail.event.MessageCountListener {
+                override fun messagesAdded(e: javax.mail.event.MessageCountEvent) {
+                    if (!e.messages.isNullOrEmpty()) {
+                        hasNewMail = true
+                    }
+                }
+
+                override fun messagesRemoved(e: javax.mail.event.MessageCountEvent) {}
+            }
+
+            folder.addMessageCountListener(listener)
+
+            while (isActive && folder.isOpen && !hasNewMail) {
+                try {
+                    imapFolder.idle()
+                } catch (e: Exception) {
+                    if (!isActive || !folder.isOpen) break
+                    throw e
+                }
+            }
+
+            if (hasNewMail) {
+                onNewMailArrived(currentUidValidity)
+            }
+
+            true
+        } finally {
+            try { folder?.close(false) } catch (_: Exception) {}
+            try { store?.close() } catch (_: Exception) {}
+        }
+    }
+
+    suspend fun fetchHeaderByUid(
+        host: String, port: Int, email: String, password: String, uid: Long, folderName: String = "INBOX"
+    ): Result<MailHeader> = withContext(Dispatchers.IO) {
+        var store: Store? = null
+        var folder: Folder? = null
+        try {
+            store = openStore(host, port, email, password, isIdle = true)
+            folder = store.getFolder(folderName)
+            folder.open(Folder.READ_ONLY)
+            val uidFolder = folder as UIDFolder
+            val msg = uidFolder.getMessageByUID(uid) ?: return@withContext Result.failure(Exception("Message not found"))
+
+            val fetchProfile = FetchProfile().apply { add(FetchProfile.Item.ENVELOPE) }
+            folder.fetch(arrayOf(msg), fetchProfile)
+
+            val header = MailHeader(
+                msgNum = msg.messageNumber,
+                subject = decodeMimeWords(msg.subject ?: "(без темы)"),
+                from = decodeMimeWords(msg.from?.joinToString(", ") { it.toString() } ?: "(неизвестно)"),
+                date = msg.sentDate?.toString() ?: ""
+            )
+            Result.success(header)
         } catch (e: Exception) {
             Result.failure(e)
         } finally {
@@ -83,7 +395,7 @@ object ImapConnector {
         var store: Store? = null
         var folder: Folder? = null
         try {
-            store = openStore(host, port, email, password)
+            store = openStore(host, port, email, password, isIdle = true)
             folder = store.getFolder(folderName)
             folder.open(Folder.READ_ONLY)
             val uidFolder = folder as UIDFolder
@@ -107,7 +419,7 @@ object ImapConnector {
         var store: Store? = null
         var folder: Folder? = null
         try {
-            store = openStore(host, port, email, password)
+            store = openStore(host, port, email, password, isIdle = true)
             folder = store.getFolder(folderName)
             folder.open(Folder.READ_WRITE)
             val message = (folder as UIDFolder).getMessageByUID(uid) ?: return@withContext Result.failure(Exception("Письмо не найдено"))
@@ -127,7 +439,7 @@ object ImapConnector {
         var store: Store? = null
         var folder: Folder? = null
         try {
-            store = openStore(host, port, email, password)
+            store = openStore(host, port, email, password, isIdle = true)
             folder = store.getFolder(folderName)
             folder.open(Folder.READ_WRITE)
             val message = folder.getMessage(msgNum) ?: return@withContext Result.failure(Exception("Письмо не найдено"))
@@ -147,9 +459,9 @@ object ImapConnector {
         var store: Store? = null
         var folder: Folder? = null
         try {
-            store = openStore(host, port, email, password)
+            store = openStore(host, port, email, password, isIdle = true)
             val folders = listFolders(host, port, email, password).getOrElse { return@withContext Result.failure(it) }
-            val spamFolder = folders.firstOrNull { name -> spamFolderNames.any { it.equals(name, ignoreCase = true) } }
+            val spamFolder = folders.firstOrNull { name -> isSpamFolder(name) }
                 ?: return@withContext Result.failure(Exception("Папка «Спам» не найдена"))
 
             folder = store.getFolder(folderName)
@@ -173,9 +485,9 @@ object ImapConnector {
         var store: Store? = null
         var folder: Folder? = null
         try {
-            store = openStore(host, port, email, password)
+            store = openStore(host, port, email, password, isIdle = true)
             val folders = listFolders(host, port, email, password).getOrElse { return@withContext Result.failure(it) }
-            val trashFolder = folders.firstOrNull { name -> trashFolderNames.any { it.equals(name, ignoreCase = true) } }
+            val trashFolder = folders.firstOrNull { name -> isTrashFolder(name) }
                 ?: return@withContext Result.failure(Exception("Папка «Корзина» не найдена"))
 
             folder = store.getFolder(folderName)
@@ -231,12 +543,28 @@ object ImapConnector {
 
     fun isSpamFolder(folderName: String): Boolean {
         val clean = folderName.trim().lowercase()
-        return spamFolderNames.any { candidate -> clean == candidate || clean.endsWith("/$candidate") || clean.endsWith("\\$candidate") }
+        if (clean.isBlank()) return false
+        val lastComponent = clean.replace('\\', '/').split('/', '.').lastOrNull()?.trim().orEmpty()
+        return spamFolderNames.any { candidate ->
+            clean == candidate ||
+                clean.endsWith("/$candidate") ||
+                clean.endsWith("\\$candidate") ||
+                clean.endsWith(".$candidate") ||
+                lastComponent == candidate
+        }
     }
 
     fun isTrashFolder(folderName: String): Boolean {
         val clean = folderName.trim().lowercase()
-        return trashFolderNames.any { candidate -> clean == candidate || clean.endsWith("/$candidate") || clean.endsWith("\\$candidate") }
+        if (clean.isBlank()) return false
+        val lastComponent = clean.replace('\\', '/').split('/', '.').lastOrNull()?.trim().orEmpty()
+        return trashFolderNames.any { candidate ->
+            clean == candidate ||
+                clean.endsWith("/$candidate") ||
+                clean.endsWith("\\$candidate") ||
+                clean.endsWith(".$candidate") ||
+                lastComponent == candidate
+        }
     }
 
     fun displayNameFor(folderName: String): String {
@@ -282,7 +610,19 @@ object ImapConnector {
                     Charsets.UTF_8
                 }
                 val decodedBytes = if (encoding == "B") {
-                    Base64.decode(content, Base64.DEFAULT)
+                    val jvmDecoded = try {
+                        val decoderClass = Class.forName("java.util.Base64")
+                        val getDecoderMethod = decoderClass.getMethod("getDecoder")
+                        val decoder = getDecoderMethod.invoke(null)
+                        val decodeMethod = decoder.javaClass.getMethod("decode", String::class.java)
+                        decodeMethod.invoke(decoder, content) as? ByteArray
+                    } catch (_: Throwable) { null }
+
+                    jvmDecoded ?: try {
+                        Base64.decode(content, Base64.DEFAULT)
+                    } catch (_: Throwable) {
+                        ByteArray(0)
+                    }
                 } else {
                     val out = java.io.ByteArrayOutputStream()
                     var i = 0
@@ -306,21 +646,27 @@ object ImapConnector {
         }
     }
 
-    private fun openStore(host: String, port: Int, email: String, password: String): Store {
+    private fun openStore(host: String, port: Int, email: String, password: String, isIdle: Boolean = false): Store {
         val props = Properties().apply {
             put("mail.store.protocol", "imaps")
             put("mail.imaps.host", host)
             put("mail.imaps.port", port.toString())
             put("mail.imaps.ssl.enable", "true")
-            put("mail.imaps.ssl.trust", "*")
+            put("mail.imaps.ssl.checkserveridentity", "true")
             put("mail.imaps.ssl.protocols", "TLSv1.2")
-            put("mail.imaps.connectiontimeout", "15000")
-            put("mail.imaps.timeout", "15000")
-            put("mail.imaps.writetimeout", "15000")
+            if (isIdle) {
+                put("mail.imaps.connectiontimeout", "30000")
+                put("mail.imaps.timeout", "1740000")
+                put("mail.imaps.writetimeout", "30000")
+            } else {
+                put("mail.imaps.connectiontimeout", "15000")
+                put("mail.imaps.timeout", "15000")
+                put("mail.imaps.writetimeout", "15000")
+            }
             put("mail.imaps.partialfetch", "false")
             put("mail.imaps.ignorebodystructure", "true")
         }
-        val isOAuth = password.startsWith("ya29.") || password.startsWith("1/") || password.startsWith("y0_") || password.length > 30
+        val isOAuth = password.startsWith("ya29.") || password.startsWith("1/") || password.startsWith("y0_")
         if (isOAuth) {
             props.put("mail.imaps.sasl.enable", "true")
             props.put("mail.imaps.auth.mechanisms", "XOAUTH2")
@@ -349,7 +695,7 @@ object ImapConnector {
         var store: Store? = null
         var folder: Folder? = null
         try {
-            store = openStore(host, port, email, password)
+            store = openStore(host, port, email, password, isIdle = true)
             folder = store.getFolder(folderName)
             folder.open(Folder.READ_ONLY)
 
@@ -411,7 +757,7 @@ object ImapConnector {
         var store: Store? = null
         var folder: Folder? = null
         try {
-            store = openStore(host, port, email, password)
+            store = openStore(host, port, email, password, isIdle = true)
             folder = store.getFolder(folderName)
             folder.open(Folder.READ_ONLY)
 
@@ -456,7 +802,7 @@ object ImapConnector {
     ): Result<List<String>> = withContext(Dispatchers.IO) {
         var store: Store? = null
         try {
-            store = openStore(host, port, email, password)
+            store = openStore(host, port, email, password, isIdle = true)
             val defaultFolder = store.defaultFolder
             val all = defaultFolder.list("*")
             val selectable = all.filter { (it.type and Folder.HOLDS_MESSAGES) != 0 }
@@ -518,7 +864,7 @@ object ImapConnector {
         var store: Store? = null
         var folder: Folder? = null
         try {
-            store = openStore(host, port, email, password)
+            store = openStore(host, port, email, password, isIdle = true)
             folder = store.getFolder(fromFolder)
             folder.open(Folder.READ_WRITE)
 
@@ -547,7 +893,7 @@ object ImapConnector {
         var store: Store? = null
         var folder: Folder? = null
         try {
-            store = openStore(host, port, email, password)
+            store = openStore(host, port, email, password, isIdle = true)
             folder = store.getFolder(folderName)
             folder.open(Folder.READ_WRITE)
 
@@ -575,7 +921,7 @@ object ImapConnector {
         val folders = foldersResult.getOrElse { return@withContext Result.failure(it) }
 
         val spamFolder = folders.firstOrNull { name ->
-            spamFolderNames.any { candidate -> name.equals(candidate, ignoreCase = true) }
+            isSpamFolder(name)
         }
 
         if (spamFolder == null) {
@@ -597,7 +943,7 @@ object ImapConnector {
         val folders = foldersResult.getOrElse { return@withContext Result.failure(it) }
 
         val trashFolder = folders.firstOrNull { name ->
-            trashFolderNames.any { candidate -> name.equals(candidate, ignoreCase = true) }
+            isTrashFolder(name)
         }
 
         if (trashFolder == null) {
@@ -676,7 +1022,7 @@ object ImapConnector {
         var store: Store? = null
         var folder: Folder? = null
         try {
-            store = openStore(host, port, email, password)
+            store = openStore(host, port, email, password, isIdle = true)
             folder = store.getFolder(folderName)
             folder.open(Folder.READ_ONLY)
             val rawMessage = folder.getMessage(msgNum)
@@ -712,8 +1058,7 @@ object ImapConnector {
                     if (counter == targetIndex) {
                         val extension = MimeTypeMap.getSingleton().getExtensionFromMimeType(contentType) ?: "dat"
                         val finalName = fileName ?: "attachment_${counter + 1}.$extension"
-                        val inputStream = p.inputStream
-                        val bytes = inputStream.readBytes()
+                        val bytes = p.inputStream.use { it.readBytes() }
                         foundResult = Pair(finalName, bytes)
                         return
                     }
@@ -807,7 +1152,7 @@ object ImapConnector {
         var store: Store? = null
         var folder: Folder? = null
         try {
-            store = openStore(host, port, email, password)
+            store = openStore(host, port, email, password, isIdle = true)
             folder = store.getFolder(folderName)
             folder.open(Folder.READ_WRITE)
             val messages = folder.messages
@@ -829,16 +1174,43 @@ object ImapConnector {
         var store: Store? = null
         var folder: Folder? = null
         try {
-            store = openStore(host, port, email, password)
+            store = openStore(host, port, email, password, isIdle = false)
             folder = store.getFolder(folderName)
             folder.open(Folder.READ_ONLY)
             val total = folder.messageCount
             val unread = folder.unreadMessageCount
             Result.success(Pair(unread, total))
         } catch (e: Exception) {
-            Result.success(Pair(0, 0))
+            Result.failure(e)
         } finally {
             try { folder?.close(false) } catch (_: Exception) {}
+            try { store?.close() } catch (_: Exception) {}
+        }
+    }
+
+    suspend fun fetchFolderCountsBatch(
+        host: String, port: Int, email: String, password: String, folderNames: List<String>
+    ): Result<Map<String, Pair<Int, Int>>> = withContext(Dispatchers.IO) {
+        var store: Store? = null
+        try {
+            store = openStore(host, port, email, password, isIdle = false)
+            val resultMap = mutableMapOf<String, Pair<Int, Int>>()
+            for (folderName in folderNames) {
+                try {
+                    val folder = store.getFolder(folderName)
+                    folder.open(Folder.READ_ONLY)
+                    val total = folder.messageCount
+                    val unread = folder.unreadMessageCount
+                    resultMap[folderName] = Pair(unread, total)
+                    try { folder.close(false) } catch (_: Exception) {}
+                } catch (e: Exception) {
+                    resultMap[folderName] = Pair(0, 0)
+                }
+            }
+            Result.success(resultMap)
+        } catch (e: Exception) {
+            Result.failure(e)
+        } finally {
             try { store?.close() } catch (_: Exception) {}
         }
     }

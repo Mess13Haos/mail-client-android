@@ -25,13 +25,13 @@ object SmtpConnector {
                 put("mail.smtp.ssl.enable", "true")
                 put("mail.smtp.host", smtpHost)
                 put("mail.smtp.port", smtpPort.toString())
-                put("mail.smtp.ssl.trust", "*")
+                put("mail.smtp.ssl.checkserveridentity", "true")
                 put("mail.smtp.ssl.protocols", "TLSv1.2")
                 put("mail.smtp.connectiontimeout", "15000")
                 put("mail.smtp.timeout", "15000")
                 put("mail.smtp.writetimeout", "15000")
             }
-            val isOAuth = password.startsWith("ya29.") || password.startsWith("1/") || password.startsWith("y0_") || password.length > 30
+            val isOAuth = password.startsWith("ya29.") || password.startsWith("1/") || password.startsWith("y0_")
             if (isOAuth) {
                 props.put("mail.smtp.sasl.enable", "true")
                 props.put("mail.smtp.auth.mechanisms", "XOAUTH2")
@@ -46,16 +46,18 @@ object SmtpConnector {
             }
 
             val transport = session.getTransport("smtp")
-            val authPassword = if (isOAuth) {
-                "user=$fromEmail\u0001auth=Bearer $password\u0001\u0001"
-            } else {
-                password
+            try {
+                val authPassword = if (isOAuth) {
+                    "user=$fromEmail\u0001auth=Bearer $password\u0001\u0001"
+                } else {
+                    password
+                }
+                transport.connect(smtpHost, smtpPort, fromEmail, authPassword)
+                transport.sendMessage(message, message.allRecipients)
+                Result.success(Unit)
+            } finally {
+                try { transport.close() } catch (_: Exception) {}
             }
-            transport.connect(smtpHost, smtpPort, fromEmail, authPassword)
-            transport.sendMessage(message, message.allRecipients)
-            transport.close()
-
-            Result.success(Unit)
         } catch (e: Exception) {
             Result.failure(e)
         }

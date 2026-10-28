@@ -1,6 +1,5 @@
 package com.example.mailclient
 
-import android.R
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
@@ -10,7 +9,9 @@ import android.media.AudioAttributes
 import android.media.RingtoneManager
 import android.net.Uri
 import android.os.Build
+import android.util.Log
 import androidx.core.app.NotificationCompat
+import androidx.core.content.ContextCompat
 
 object NotificationHelper {
     const val CHANNEL_ID = "new_mail_channel"
@@ -23,29 +24,59 @@ object NotificationHelper {
     const val EXTRA_UID = "extra_uid"
     const val EXTRA_NOTIFICATION_ID = "extra_notification_id"
 
+    fun isNotificationAllowed(context: Context): Boolean {
+        val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        if (!manager.areNotificationsEnabled()) return false
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            val permission = ContextCompat.checkSelfPermission(context, android.Manifest.permission.POST_NOTIFICATIONS)
+            if (permission != android.content.pm.PackageManager.PERMISSION_GRANTED) return false
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = manager.getNotificationChannel(CHANNEL_ID)
+            if (channel != null && channel.importance == NotificationManager.IMPORTANCE_NONE) return false
+        }
+        return true
+    }
+
+    fun dismissNotification(context: Context, accountEmail: String, uid: Long) {
+        val repository = MailSyncRepository(context)
+        val savedValidity = repository.dbHelper.getSavedUidValidity(
+            repository.dbHelper.readableDatabase,
+            accountEmail,
+            "INBOX"
+        )
+        val notificationId = MailNotificationState.notificationId(accountEmail, uid, "INBOX", savedValidity)
+        val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        manager.cancel(notificationId)
+        CredentialStore.setNotifiedUids(
+            context,
+            accountEmail,
+            CredentialStore.getNotifiedUids(context, accountEmail) - uid
+        )
+    }
+
     fun ensureChannel(context: Context) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-            val soundUriStr = ThemeStore.getNotificationSoundUri(context)
-            val soundUri = if (soundUriStr.isNotBlank()) Uri.parse(soundUriStr) else RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
+            if (manager.getNotificationChannel(CHANNEL_ID) == null) {
+                val soundUriStr = ThemeStore.getNotificationSoundUri(context)
+                val soundUri = if (soundUriStr.isNotBlank()) Uri.parse(soundUriStr) else RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
 
-            try {
-                manager.deleteNotificationChannel(CHANNEL_ID)
-            } catch (_: Exception) {}
+                val audioAttributes = AudioAttributes.Builder()
+                    .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                    .setUsage(AudioAttributes.USAGE_NOTIFICATION)
+                    .build()
 
-            val audioAttributes = AudioAttributes.Builder()
-                .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
-                .setUsage(AudioAttributes.USAGE_NOTIFICATION)
-                .build()
-
-            val channel = NotificationChannel(
-                CHANNEL_ID,
-                "Новые письма",
-                NotificationManager.IMPORTANCE_DEFAULT
-            ).apply {
-                setSound(soundUri, audioAttributes)
+                val channel = NotificationChannel(
+                    CHANNEL_ID,
+                    "Новые письма",
+                    NotificationManager.IMPORTANCE_HIGH
+                ).apply {
+                    setSound(soundUri, audioAttributes)
+                    enableVibration(true)
+                }
+                manager.createNotificationChannel(channel)
             }
-            manager.createNotificationChannel(channel)
         }
     }
 
@@ -57,7 +88,12 @@ object NotificationHelper {
         uid: Long,
         from: String,
         subject: String
-    ) {
+    ): Boolean {
+        if (!isNotificationAllowed(context)) {
+            Log.w("NotificationHelper", "Notifications disabled or permission not granted for $accountEmail")
+            return false
+        }
+
         ensureChannel(context)
 
         fun actionIntent(action: String): PendingIntent {
@@ -83,7 +119,7 @@ object NotificationHelper {
             putExtra("target_folder", "INBOX")
         }
         val contentPendingIntent = PendingIntent.getActivity(
-            context, notificationId, openAppIntent,
+            context, MailNotificationState.notificationId(accountEmail, uid), openAppIntent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
@@ -91,11 +127,12 @@ object NotificationHelper {
         val soundUri = if (soundUriStr.isNotBlank()) Uri.parse(soundUriStr) else null
 
         val builder = NotificationCompat.Builder(context, CHANNEL_ID)
-            .setSmallIcon(R.drawable.ic_dialog_email)
+            .setSmallIcon(android.R.drawable.ic_dialog_email)
             .setContentTitle(from)
             .setContentText(subject)
             .setSubText(accountEmail)
             .setAutoCancel(true)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .setContentIntent(contentPendingIntent)
             .addAction(0, "Прочитано", actionIntent(ACTION_MARK_READ))
             .addAction(0, "Спам", actionIntent(ACTION_SPAM))
@@ -108,6 +145,12 @@ object NotificationHelper {
         val notification = builder.build()
 
         val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        manager.notify(notificationId, notification)
+        return try {
+            manager.notify(notificationId, notification)
+            true
+        } catch (e: Exception) {
+            Log.e("NotificationHelper", "Failed to dispatch notification for $accountEmail", e)
+            false
+        }
     }
 }
