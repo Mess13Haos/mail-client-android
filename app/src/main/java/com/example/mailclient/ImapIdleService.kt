@@ -36,7 +36,9 @@ class ImapIdleService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        startForegroundNotification()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            startForegroundNotification()
+        }
         serviceScope.launch {
             while (isActive) {
                 updateMonitoringJobs(CredentialStore.loadAccounts(this@ImapIdleService))
@@ -46,8 +48,27 @@ class ImapIdleService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (intent?.action == ACTION_STOP) {
+            Log.i(TAG, "Stop monitoring action received from notification")
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                stopForeground(STOP_FOREGROUND_REMOVE)
+            } else {
+                @Suppress("DEPRECATION")
+                stopForeground(true)
+            }
+            stopSelf()
+            return START_NOT_STICKY
+        }
+
         val accounts = CredentialStore.loadAccounts(this)
         if (accounts.isEmpty()) {
+            Log.i(TAG, "No active accounts remaining. Stopping ImapIdleService.")
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                stopForeground(STOP_FOREGROUND_REMOVE)
+            } else {
+                @Suppress("DEPRECATION")
+                stopForeground(true)
+            }
             stopSelf()
             return START_NOT_STICKY
         }
@@ -94,6 +115,12 @@ class ImapIdleService : Service() {
         val title = getString(R.string.monitoring_service_title)
         val text = getString(R.string.monitoring_service_text)
 
+        val stopIntent = Intent(this, ImapIdleService::class.java).apply { action = ACTION_STOP }
+        val stopPendingIntent = android.app.PendingIntent.getService(
+            this, 0, stopIntent,
+            android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE
+        )
+
         val notification = NotificationCompat.Builder(this, CHANNEL_SERVICE_ID)
             .setSmallIcon(android.R.drawable.ic_dialog_email)
             .setContentTitle(title)
@@ -102,7 +129,10 @@ class ImapIdleService : Service() {
             .setPriority(NotificationCompat.PRIORITY_MIN)
             .setCategory(NotificationCompat.CATEGORY_SERVICE)
             .setVisibility(NotificationCompat.VISIBILITY_SECRET)
+            .setSilent(true)
+            .setShowWhen(false)
             .setSound(null)
+            .addAction(0, "Остановить мониторинг", stopPendingIntent)
             .build()
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
@@ -155,39 +185,45 @@ class ImapIdleService : Service() {
 
                 var isAuthFailed = false
                 try {
-                    val lock = AccountSyncLocks.getLock(account.email)
-                    lock.withLock {
-                        val unreadResult = ImapConnector.fetchUnreadInboxMessages(
-                            host = preset.host, port = preset.port,
-                            email = account.email, password = account.password
-                        )
-                        if (unreadResult.isSuccess) {
-                            val unreadData = unreadResult.getOrThrow()
-                            val repository = MailSyncRepository(this@ImapIdleService)
-                            val savedValidity = repository.dbHelper.getSavedUidValidity(repository.dbHelper.readableDatabase, account.email.trim().lowercase(), "INBOX")
-                            val isUidValidityChanged = savedValidity > 0L && savedValidity != unreadData.uidValidity
+                    val unreadResult = ImapConnector.fetchUnreadInboxMessages(
+                        host = preset.host, port = preset.port,
+                        email = account.email, password = account.password
+                    )
+                    if (unreadResult.isSuccess) {
+                        val unreadData = unreadResult.getOrThrow()
+                        val repository = MailSyncRepository(this@ImapIdleService)
+                        val savedValidity = repository.dbHelper.getSavedUidValidity(repository.dbHelper.readableDatabase, account.email.trim().lowercase(), "INBOX")
+                        val isUidValidityChanged = savedValidity > 0L && savedValidity != unreadData.uidValidity
 
-                            if (isUidValidityChanged) {
-                                val scanResult = ImapConnector.fetchFolderMessagesFullScan(
-                                    host = preset.host, port = preset.port,
-                                    email = account.email, password = account.password,
-                                    folderName = "INBOX"
-                                )
-                                if (scanResult.isSuccess) {
-                                    val scannedMails = scanResult.getOrThrow().unseenMessages
-                                    reconcileAndNotify(account.email, account.presetLabel, unreadData.unseenMessages, scannedMails, unreadData.uidValidity)
-                                } else {
-                                    Log.e(TAG, "Recovery scan failed for ${account.email}, skipping state commit", scanResult.exceptionOrNull())
-                                }
+                        if (isUidValidityChanged) {
+                            val scanResult = ImapConnector.fetchFolderMessagesFullScan(
+                                host = preset.host, port = preset.port,
+                                email = account.email, password = account.password,
+                                folderName = "INBOX"
+                            )
+                            if (scanResult.isSuccess) {
+                                val scannedMails = scanResult.getOrThrow().unseenMessages
+                                reconcileAndNotify(account.email, account.presetLabel, unreadData.unseenMessages, scannedMails, unreadData.uidValidity)
                             } else {
-                                reconcileAndNotify(account.email, account.presetLabel, unreadData.unseenMessages, null, unreadData.uidValidity)
+                                Log.e(TAG, "Recovery scan failed for ${account.email}, skipping state commit", scanResult.exceptionOrNull())
                             }
                         } else {
-                            val e = unreadResult.exceptionOrNull()
-                            if (e != null && isAuthError(e)) {
-                                Log.w(TAG, "Authentication failed for ${account.email}")
-                                isAuthFailed = true
-                            }
+                            val authoritativeLastUid = repository.getAuthoritativeLastNotifiedUid(account.email, "INBOX")
+                            val newlyReceivedResult = ImapConnector.fetchNewInboxMail(
+                                host = preset.host, port = preset.port,
+                                email = account.email, password = account.password,
+                                sinceUid = authoritativeLastUid
+                            )
+                            val newlyReceivedPair = newlyReceivedResult.getOrNull()
+                            val newlyReceivedMessages = newlyReceivedPair?.first
+                            val newlyReceivedCursor = newlyReceivedPair?.second ?: 0L
+                            reconcileAndNotify(account.email, account.presetLabel, unreadData.unseenMessages, newlyReceivedMessages, unreadData.uidValidity, newlyReceivedCursor)
+                        }
+                    } else {
+                        val e = unreadResult.exceptionOrNull()
+                        if (e != null && isAuthError(e)) {
+                            Log.w(TAG, "Authentication failed for ${account.email}")
+                            isAuthFailed = true
                         }
                     }
                 } catch (e: Exception) {
@@ -213,15 +249,22 @@ class ImapIdleService : Service() {
                         email = account.email,
                         password = account.password,
                         onNewMailArrived = { validity ->
-                            val lock = AccountSyncLocks.getLock(account.email)
-                            lock.withLock {
-                                val unreadRes = ImapConnector.fetchUnreadInboxMessages(
+                            val repository = MailSyncRepository(this@ImapIdleService)
+                            val unreadRes = ImapConnector.fetchUnreadInboxMessages(
+                                host = preset.host, port = preset.port,
+                                email = account.email, password = account.password
+                            )
+                            unreadRes.onSuccess { unreadData ->
+                                val authoritativeLastUid = repository.getAuthoritativeLastNotifiedUid(account.email, "INBOX")
+                                val newlyReceivedRes = ImapConnector.fetchNewInboxMail(
                                     host = preset.host, port = preset.port,
-                                    email = account.email, password = account.password
+                                    email = account.email, password = account.password,
+                                    sinceUid = authoritativeLastUid
                                 )
-                                unreadRes.onSuccess { unreadData ->
-                                    reconcileAndNotify(account.email, account.presetLabel, unreadData.unseenMessages, null, unreadData.uidValidity)
-                                }
+                                val newlyReceivedPair = newlyReceivedRes.getOrNull()
+                                val newlyReceivedMessages = newlyReceivedPair?.first
+                                val newlyReceivedCursor = newlyReceivedPair?.second ?: 0L
+                                reconcileAndNotify(account.email, account.presetLabel, unreadData.unseenMessages, newlyReceivedMessages, unreadData.uidValidity, newlyReceivedCursor)
                             }
                         }
                     )
@@ -253,25 +296,26 @@ class ImapIdleService : Service() {
         presetLabel: String,
         unreadMessages: List<ImapConnector.NewMailInfo>?,
         newlyReceivedMessages: List<ImapConnector.NewMailInfo>?,
-        uidValidity: Long?
+        uidValidity: Long?,
+        newHighestUid: Long = 0L
     ) {
-        val lock = AccountSyncLocks.getLock(accountEmail)
-        lock.withLock {
-            val repository = MailSyncRepository(this)
-            val highestUid = (unreadMessages.orEmpty() + newlyReceivedMessages.orEmpty()).maxOfOrNull { it.uid } ?: 0L
-            val syncResult = repository.processSyncAtomic(
-                accountEmail = accountEmail,
-                presetLabel = presetLabel,
-                folderName = "INBOX",
-                serverUidValidity = uidValidity ?: 0L,
-                unreadMessages = unreadMessages,
-                newlyReceivedMessages = newlyReceivedMessages,
-                newHighestUid = highestUid
-            )
+        val repository = MailSyncRepository(this)
+        val highestUid = maxOf(
+            (unreadMessages.orEmpty() + newlyReceivedMessages.orEmpty()).maxOfOrNull { it.uid } ?: 0L,
+            newHighestUid
+        )
+        val syncResult = repository.processSyncAtomic(
+            accountEmail = accountEmail,
+            presetLabel = presetLabel,
+            folderName = "INBOX",
+            serverUidValidity = uidValidity ?: 0L,
+            unreadMessages = unreadMessages,
+            newlyReceivedMessages = newlyReceivedMessages,
+            newHighestUid = highestUid
+        )
 
-            repository.dismissNotifications(this, accountEmail, syncResult.uidsToDismiss)
-            repository.dispatchPendingNotifications(this, accountEmail, presetLabel)
-        }
+        repository.dismissNotifications(this, accountEmail, syncResult.uidsToDismiss)
+        repository.dispatchPendingNotifications(this, accountEmail, presetLabel)
     }
 
     private fun isAuthError(e: Throwable): Boolean {
@@ -292,6 +336,7 @@ class ImapIdleService : Service() {
     companion object {
         private const val TAG = "ImapIdleService"
         const val CHANNEL_SERVICE_ID = "imap_monitoring_channel"
+        const val ACTION_STOP = "com.example.mailclient.ACTION_STOP_MONITORING"
         private const val SERVICE_NOTIFICATION_ID = 1001
 
         fun start(context: Context) {

@@ -51,7 +51,8 @@ class FullScanRecoveryAndIntegrityTest {
             port: Int,
             email: String,
             password: String,
-            folderName: String
+            folderName: String,
+            mode: Int
         ): ImapConnector.FolderHandle {
             if (openException != null) throw openException
             return FakeFolderHandle(messages, initialValidity, finalValidity, throwOnLowIndex)

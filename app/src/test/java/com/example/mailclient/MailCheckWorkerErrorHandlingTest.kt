@@ -20,7 +20,8 @@ class MailCheckWorkerErrorHandlingTest {
             port: Int,
             email: String,
             password: String,
-            folderName: String
+            folderName: String,
+            mode: Int
         ): ImapConnector.FolderHandle {
             if (throwCancellation) {
                 throw CancellationException("Worker coroutine cancelled")

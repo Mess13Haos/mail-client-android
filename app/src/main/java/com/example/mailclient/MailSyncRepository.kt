@@ -37,9 +37,11 @@ class MailSyncRepository(context: Context) {
         newlyReceivedMessages: List<ImapConnector.NewMailInfo>?,
         newHighestUid: Long = 0L
     ): SyncResult {
-        val db = dbHelper.writableDatabase
-        db.beginTransaction()
-        try {
+        val lock = AccountSyncLocks.getLock(accountEmail)
+        return lock.withLock {
+            val db = dbHelper.writableDatabase
+            db.beginTransaction()
+            try {
                 val emailKey = accountEmail.trim().lowercase()
 
                 var uidValidityChanged = false
@@ -48,7 +50,7 @@ class MailSyncRepository(context: Context) {
                     if (savedValidity > 0L && serverUidValidity < savedValidity) {
                         Log.w("MailSyncRepository", "Ignoring stale sync result for $emailKey (serverValidity=$serverUidValidity, savedValidity=$savedValidity)")
                         db.setTransactionSuccessful()
-                        return SyncResult(emptyList(), emptyList(), false)
+                        return@withLock SyncResult(emptyList(), emptyList(), false)
                     }
                     if (savedValidity > 0L && savedValidity != serverUidValidity) {
                         dbHelper.clearNotifiedUidsForAccount(db, emailKey)
@@ -103,7 +105,7 @@ class MailSyncRepository(context: Context) {
                 db.setTransactionSuccessful()
 
                 val pendingToDispatch = dbHelper.getPendingNotifications(db, emailKey)
-                return SyncResult(
+                SyncResult(
                     pendingEventsToDispatch = pendingToDispatch,
                     uidsToDismiss = uidsToDismiss,
                     uidValidityChanged = uidValidityChanged
@@ -111,45 +113,49 @@ class MailSyncRepository(context: Context) {
             } finally {
                 db.endTransaction()
             }
+        }
     }
 
     suspend fun dispatchPendingNotifications(context: Context, accountEmail: String, presetLabel: String) {
-        val db = dbHelper.writableDatabase
-        val reservedEvents = dbHelper.reservePendingNotifications(db, accountEmail)
-        if (reservedEvents.isEmpty()) return
+        val lock = AccountSyncLocks.getLock(accountEmail)
+        lock.withLock {
+            val db = dbHelper.writableDatabase
+            val reservedEvents = dbHelper.reservePendingNotifications(db, accountEmail)
+            if (reservedEvents.isEmpty()) return@withLock
 
-        val savedValidity = dbHelper.getSavedUidValidity(db, accountEmail, "INBOX")
+            val savedValidity = dbHelper.getSavedUidValidity(db, accountEmail, "INBOX")
 
-        reservedEvents.forEach { event ->
-            val notificationId = MailNotificationState.notificationId(
-                email = event.accountEmail,
-                uid = event.uid,
-                folderName = "INBOX",
-                uidValidity = savedValidity
-            )
+            reservedEvents.forEach { event ->
+                val notificationId = MailNotificationState.notificationId(
+                    email = event.accountEmail,
+                    uid = event.uid,
+                    folderName = "INBOX",
+                    uidValidity = savedValidity
+                )
 
-            val success = NotificationHelper.showNewMailNotification(
-                context = context,
-                notificationId = notificationId,
-                accountEmail = event.accountEmail,
-                presetLabel = presetLabel,
-                uid = event.uid,
-                from = event.sender,
-                subject = event.subject
-            )
+                val success = NotificationHelper.showNewMailNotification(
+                    context = context,
+                    notificationId = notificationId,
+                    accountEmail = event.accountEmail,
+                    presetLabel = presetLabel,
+                    uid = event.uid,
+                    from = event.sender,
+                    subject = event.subject
+                )
 
-            if (success) {
-                db.beginTransaction()
-                try {
-                    dbHelper.removePendingNotification(db, event.eventKey)
-                    dbHelper.addNotifiedUid(db, event.accountEmail, event.uid)
-                    db.setTransactionSuccessful()
-                } finally {
-                    db.endTransaction()
+                if (success) {
+                    db.beginTransaction()
+                    try {
+                        dbHelper.removePendingNotification(db, event.eventKey)
+                        dbHelper.addNotifiedUid(db, event.accountEmail, event.uid)
+                        db.setTransactionSuccessful()
+                    } finally {
+                        db.endTransaction()
+                    }
+                } else {
+                    Log.w("MailSyncRepository", "Notification failed or permission denied for ${event.accountEmail} (eventKey=${event.eventKey}). Reverting reservation.")
+                    dbHelper.unreservePendingNotification(db, event.eventKey)
                 }
-            } else {
-                Log.w("MailSyncRepository", "Notification failed or permission denied for ${event.accountEmail} (eventKey=${event.eventKey}). Reverting reservation.")
-                dbHelper.unreservePendingNotification(db, event.eventKey)
             }
         }
     }

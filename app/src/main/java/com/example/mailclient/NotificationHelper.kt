@@ -40,19 +40,19 @@ object NotificationHelper {
 
     fun dismissNotification(context: Context, accountEmail: String, uid: Long) {
         val repository = MailSyncRepository(context)
+        val emailKey = accountEmail.trim().lowercase()
         val savedValidity = repository.dbHelper.getSavedUidValidity(
             repository.dbHelper.readableDatabase,
-            accountEmail,
+            emailKey,
             "INBOX"
         )
-        val notificationId = MailNotificationState.notificationId(accountEmail, uid, "INBOX", savedValidity)
+        val notificationId = MailNotificationState.notificationId(emailKey, uid, "INBOX", savedValidity)
         val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         manager.cancel(notificationId)
-        CredentialStore.setNotifiedUids(
-            context,
-            accountEmail,
-            CredentialStore.getNotifiedUids(context, accountEmail) - uid
-        )
+        val db = repository.dbHelper.writableDatabase
+        repository.dbHelper.removeNotifiedUid(db, emailKey, uid)
+        val eventKey = "${emailKey}_${savedValidity}_${uid}"
+        repository.dbHelper.removePendingNotification(db, eventKey)
     }
 
     fun ensureChannel(context: Context) {

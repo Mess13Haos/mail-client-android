@@ -27,3 +27,25 @@ keystore.properties
 captures/
 .externalNativeBuild/
 .cxx/
+
+# Kotlin daemon / compiler caches
+.kotlin/
+
+# Логи и временные файлы
+*.log
+*.tmp
+*.temp
+*.swp
+*.swo
+*~
+tmp/
+temp/
+
+# VS Code / IDE
+.vscode/
+.vs/
+
+# OS
+Thumbs.db
+ehthumbs.db
+Desktop.ini

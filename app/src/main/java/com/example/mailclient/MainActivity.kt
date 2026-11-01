@@ -859,33 +859,37 @@ fun MailboxScreen(
         loadPage(0)
     }
 
-    fun deleteOrTrash(msgNum: Int) {
+    fun deleteOrTrashByUid(uid: Long) {
         scope.launch {
             isLoading = true
-            if (ImapConnector.isTrashFolder(folderName) || ImapConnector.isSpamFolder(folderName)) {
-                ImapConnector.deleteMessage(host, port, email, password, msgNum, folderName)
+            val result = if (ImapConnector.isTrashFolder(folderName) || ImapConnector.isSpamFolder(folderName)) {
+                ImapConnector.deleteMessageByUid(host, port, email, password, uid, folderName)
             } else {
-                ImapConnector.moveToTrash(host, port, email, password, msgNum, folderName)
+                ImapConnector.moveToTrashByUid(host, port, email, password, uid, folderName)
             }
-            loadPage(offset)
+            isLoading = false
+            result.fold(
+                onSuccess = { loadPage(offset) },
+                onFailure = { error -> errorText = "Ошибка: ${error.message}" }
+            )
         }
     }
 
     fun executeGestureAction(action: ThemeStore.GestureAction, mail: ImapConnector.MailHeader) {
         when (action) {
             ThemeStore.GestureAction.DELETE -> {
-                deleteOrTrash(mail.msgNum)
+                deleteOrTrashByUid(mail.uid)
             }
             ThemeStore.GestureAction.MARK_READ -> {
                 scope.launch {
-                    ImapConnector.markAsRead(host, port, email, password, mail.msgNum, folderName)
+                    ImapConnector.markAsReadByUid(host, port, email, password, mail.uid, folderName)
                     loadPage(offset)
                 }
             }
             ThemeStore.GestureAction.SPAM -> {
                 scope.launch {
                     isLoading = true
-                    ImapConnector.moveToSpam(host, port, email, password, mail.msgNum, folderName)
+                    ImapConnector.moveToSpamByUid(host, port, email, password, mail.uid, folderName)
                     loadPage(offset)
                 }
             }
@@ -960,7 +964,7 @@ fun MailboxScreen(
                     contentPadding = PaddingValues(vertical = 8.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    items(messages, key = { it.msgNum }) { mail ->
+                    items(messages, key = { it.uid }) { mail ->
                         val dismissState = rememberSwipeToDismissBoxState(
                             confirmValueChange = { dismissValue ->
                                 when (dismissValue) {
@@ -1088,7 +1092,7 @@ fun MailboxScreen(
                         onClick = {
                             selectedMailForMenu = null
                             scope.launch {
-                                ImapConnector.markAsRead(host, port, email, password, mailForMenu.msgNum, folderName)
+                                ImapConnector.markAsReadByUid(host, port, email, password, mailForMenu.uid, folderName)
                                 loadPage(offset)
                             }
                         },
@@ -1101,7 +1105,7 @@ fun MailboxScreen(
                             selectedMailForMenu = null
                             scope.launch {
                                 isLoading = true
-                                ImapConnector.moveToSpam(host, port, email, password, mailForMenu.msgNum, folderName)
+                                ImapConnector.moveToSpamByUid(host, port, email, password, mailForMenu.uid, folderName)
                                 loadPage(offset)
                             }
                         },
@@ -1112,7 +1116,7 @@ fun MailboxScreen(
                     TextButton(
                         onClick = {
                             selectedMailForMenu = null
-                            deleteOrTrash(mailForMenu.msgNum)
+                            deleteOrTrashByUid(mailForMenu.uid)
                         },
                         modifier = Modifier.fillMaxWidth()
                     ) {
@@ -1203,10 +1207,10 @@ fun MessageScreen(
 
     val isBusy = pendingAction != PendingAction.NONE
 
-    LaunchedEffect(header.msgNum) {
-        val result = ImapConnector.fetchMessageBody(
+    LaunchedEffect(header.uid) {
+        val result = ImapConnector.fetchMessageBodyByUid(
             host = host, port = port, email = email, password = password,
-            msgNum = header.msgNum, folderName = folderName
+            uid = header.uid, folderName = folderName
         )
         isLoading = false
         result.fold(
@@ -1227,9 +1231,9 @@ fun MessageScreen(
         pendingAction = PendingAction.DELETE
         scope.launch {
             val result = if (ImapConnector.isTrashFolder(folderName)) {
-                ImapConnector.deleteMessage(host, port, email, password, header.msgNum, folderName)
+                ImapConnector.deleteMessageByUid(host, port, email, password, header.uid, folderName)
             } else {
-                ImapConnector.moveToTrash(host, port, email, password, header.msgNum, folderName)
+                ImapConnector.moveToTrashByUid(host, port, email, password, header.uid, folderName)
             }
             pendingAction = PendingAction.NONE
             result.fold(
@@ -1242,7 +1246,7 @@ fun MessageScreen(
     fun runRestore() {
         pendingAction = PendingAction.RESTORE
         scope.launch {
-            val result = ImapConnector.restoreFromTrash(host, port, email, password, header.msgNum, folderName)
+            val result = ImapConnector.restoreFromTrashByUid(host, port, email, password, header.uid, folderName)
             pendingAction = PendingAction.NONE
             result.fold(
                 onSuccess = { onActionDone() },
@@ -1254,7 +1258,7 @@ fun MessageScreen(
     fun runSpam() {
         pendingAction = PendingAction.SPAM
         scope.launch {
-            val result = ImapConnector.moveToSpam(host, port, email, password, header.msgNum, folderName)
+            val result = ImapConnector.moveToSpamByUid(host, port, email, password, header.uid, folderName)
             pendingAction = PendingAction.NONE
             result.fold(
                 onSuccess = { onActionDone() },
@@ -1396,7 +1400,7 @@ fun MessageScreen(
                         onClick = {
                             isDownloading = true
                             scope.launch {
-                                val result = ImapConnector.downloadAttachment(host, port, email, password, header.msgNum, folderName, att.index)
+                                val result = ImapConnector.downloadAttachmentByUid(host, port, email, password, header.uid, folderName, att.index)
                                 isDownloading = false
                                 result.fold(
                                     onSuccess = { (fileName, bytes) ->
@@ -1498,9 +1502,9 @@ fun MessageScreen(
                                 onClick = {
                                     pendingAction = PendingAction.MOVE
                                     scope.launch {
-                                        val result = ImapConnector.moveMessage(
+                                        val result = ImapConnector.moveMessageByUid(
                                             host = host, port = port, email = email, password = password,
-                                            msgNum = header.msgNum, fromFolder = folderName, toFolder = folder
+                                            uid = header.uid, fromFolder = folderName, toFolder = folder
                                         )
                                         pendingAction = PendingAction.NONE
                                         showMoveDialog = false
