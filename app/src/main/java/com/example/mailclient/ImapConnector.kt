@@ -545,13 +545,15 @@ object ImapConnector {
     )
 
     val spamFolderNames = listOf(
-        "spam", "junk", "junk e-mail", "bulk mail", "bulk",
-        "спам", "[gmail]/spam", "[gmail]/спам", "[google mail]/spam"
+        "spam", "junk", "junk e-mail", "junk email", "bulk mail", "bulk",
+        "спам", "рассылки",
+        "[gmail]/spam", "[gmail]/спам", "[google mail]/spam"
     )
 
     val trashFolderNames = listOf(
-        "trash", "deleted", "deleted items", "deleted messages", "bin",
-        "корзина", "удалённые", "удаленные", "[gmail]/trash", "[gmail]/корзина", "[gmail]/bin", "[google mail]/trash"
+        "trash", "deleted", "deleted items", "deleted messages", "deleted items", "bin", "rubbish",
+        "корзина", "удалённые", "удаленные", "корзина",
+        "[gmail]/trash", "[gmail]/корзина", "[gmail]/bin", "[google mail]/trash"
     )
 
     fun isSpamFolder(folderName: String): Boolean {
@@ -592,14 +594,16 @@ object ImapConnector {
         }.trim()
 
         return when {
-            clean.equals("INBOX", ignoreCase = true) -> "Входящие"
+            clean.equals("INBOX", ignoreCase = true) || clean.equals("Входящие", ignoreCase = true) -> "Входящие"
             isTrashFolder(clean) || isTrashFolder(folderName) -> "Корзина"
             isSpamFolder(clean) || isSpamFolder(folderName) -> "Спам"
-            clean.equals("All Mail", ignoreCase = true) || clean.equals("Вся почта", ignoreCase = true) -> "Вся почта"
+            clean.equals("All Mail", ignoreCase = true) || clean.equals("All", ignoreCase = true) || clean.equals("Вся почта", ignoreCase = true) -> "Вся почта"
             clean.equals("Important", ignoreCase = true) || clean.equals("Важное", ignoreCase = true) -> "Важное"
-            clean.equals("Starred", ignoreCase = true) || clean.equals("Помеченные", ignoreCase = true) -> "Помеченные"
-            clean.equals("Sent Mail", ignoreCase = true) || clean.equals("Отправленные", ignoreCase = true) || clean.equals("Sent", ignoreCase = true) -> "Отправленные"
-            clean.equals("Drafts", ignoreCase = true) || clean.equals("Черновики", ignoreCase = true) -> "Черновики"
+            clean.equals("Starred", ignoreCase = true) || clean.equals("Flagged", ignoreCase = true) || clean.equals("Помеченные", ignoreCase = true) || clean.equals("Избранное", ignoreCase = true) -> "Помеченные"
+            clean.equals("Sent", ignoreCase = true) || clean.equals("Sent Mail", ignoreCase = true) || clean.equals("Sent Items", ignoreCase = true) || clean.equals("Sent Messages", ignoreCase = true) || clean.equals("Отправленные", ignoreCase = true) -> "Отправленные"
+            clean.equals("Drafts", ignoreCase = true) || clean.equals("Draft", ignoreCase = true) || clean.equals("Черновики", ignoreCase = true) || clean.equals("Черновик", ignoreCase = true) -> "Черновики"
+            clean.equals("Archive", ignoreCase = true) || clean.equals("Архив", ignoreCase = true) -> "Архив"
+            clean.equals("Outbox", ignoreCase = true) || clean.equals("Исходящие", ignoreCase = true) -> "Исходящие"
             else -> clean
         }
     }
