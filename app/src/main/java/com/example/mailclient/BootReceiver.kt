@@ -22,8 +22,6 @@ class BootReceiver : BroadcastReceiver() {
                 ExistingPeriodicWorkPolicy.KEEP,
                 workRequest
             )
-            // On Android 15 (API 35+), dataSync foreground service cannot be started directly from BOOT_COMPLETED.
-            // WorkManager handles post-boot background checks, and ImapIdleService starts when app is opened.
         }
     }
 }
