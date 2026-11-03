@@ -48,4 +48,13 @@ temp/
 # OS
 Thumbs.db
 ehthumbs.db
+app/release/
+
+
+# Служебные файлы агентов и внутренняя переписка (не для сборки)
+AI_RULES.md
+CLAUDE.md
+DEV_*.md
+QA_*.md
+
 Desktop.ini
