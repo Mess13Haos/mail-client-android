@@ -27,6 +27,10 @@ object NotificationHelper {
     fun isNotificationAllowed(context: Context): Boolean {
         val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         if (!manager.areNotificationsEnabled()) return false
+        // В режиме «Не беспокоить» (без исключений) новые письма не шлют карточки в шторку.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            if (manager.currentInterruptionFilter == NotificationManager.INTERRUPTION_FILTER_NONE) return false
+        }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             val permission = ContextCompat.checkSelfPermission(context, android.Manifest.permission.POST_NOTIFICATIONS)
             if (permission != android.content.pm.PackageManager.PERMISSION_GRANTED) return false
@@ -46,13 +50,21 @@ object NotificationHelper {
             emailKey,
             "INBOX"
         )
-        val notificationId = MailNotificationState.notificationId(emailKey, uid, "INBOX", savedValidity)
         val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        manager.cancel(notificationId)
+        // Отменяем карточку по любому из возможных ID: с текущей UIDVALIDITY и с дефолтной 0L,
+        // чтобы смена validity на сервере не мешала снятию карточки.
+        val notificationIds = setOf(
+            MailNotificationState.notificationId(emailKey, uid, "INBOX", savedValidity),
+            MailNotificationState.notificationId(emailKey, uid, "INBOX", 0L)
+        )
+        notificationIds.forEach { manager.cancel(it) }
         val db = repository.dbHelper.writableDatabase
         repository.dbHelper.removeNotifiedUid(db, emailKey, uid)
-        val eventKey = "${emailKey}_${savedValidity}_${uid}"
-        repository.dbHelper.removePendingNotification(db, eventKey)
+        // Удаляем pending-запись независимо от validity, под которой она была создана.
+        repository.dbHelper.removePendingNotificationForUid(db, emailKey, uid)
+        // Синхронизируем дублирующее хранилище в SharedPreferences.
+        CredentialStore.removeNotifiedUid(context, emailKey, uid)
+        CredentialStore.removePendingNotification(context, emailKey, uid)
     }
 
     fun ensureChannel(context: Context) {
@@ -119,7 +131,7 @@ object NotificationHelper {
             putExtra("target_folder", "INBOX")
         }
         val contentPendingIntent = PendingIntent.getActivity(
-            context, MailNotificationState.notificationId(accountEmail, uid), openAppIntent,
+            context, notificationId, openAppIntent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 

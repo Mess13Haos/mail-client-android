@@ -411,15 +411,20 @@ object ImapConnector {
             val uidFolder = folder as UIDFolder
             val msg = uidFolder.getMessageByUID(uid) ?: return@withContext Result.failure(Exception("Message not found"))
 
-            val fetchProfile = FetchProfile().apply { add(FetchProfile.Item.ENVELOPE) }
+            val fetchProfile = FetchProfile().apply {
+                add(FetchProfile.Item.ENVELOPE)
+                add(FetchProfile.Item.FLAGS)
+            }
             folder.fetch(arrayOf(msg), fetchProfile)
+            val isSeen = try { msg.isSet(Flags.Flag.SEEN) } catch (_: Exception) { false }
 
             val header = MailHeader(
                 uid = uid,
                 msgNum = msg.messageNumber,
                 subject = decodeMimeWords(msg.subject ?: "(без темы)"),
                 from = decodeMimeWords(msg.from?.joinToString(", ") { it.toString() } ?: "(неизвестно)"),
-                date = msg.sentDate?.toString() ?: ""
+                date = msg.sentDate?.toString() ?: "",
+                isSeen = isSeen
             )
             Result.success(header)
         } catch (e: Exception) {
@@ -536,7 +541,8 @@ object ImapConnector {
         val msgNum: Int,
         val subject: String,
         val from: String,
-        val date: String
+        val date: String,
+        val isSeen: Boolean = false
     )
 
     data class MailPage(
@@ -731,17 +737,20 @@ object ImapConnector {
 
             val fetchProfile = FetchProfile()
             fetchProfile.add(FetchProfile.Item.ENVELOPE)
+            fetchProfile.add(FetchProfile.Item.FLAGS)
             folder.fetch(rawMessages, fetchProfile)
 
             val uidFolder = folder as UIDFolder
             val headers = rawMessages.map { msg ->
                 val uid = try { uidFolder.getUID(msg) } catch (_: Exception) { 0L }
+                val isSeen = try { msg.isSet(Flags.Flag.SEEN) } catch (_: Exception) { false }
                 MailHeader(
                     uid = uid,
                     msgNum = msg.messageNumber,
                     subject = decodeMimeWords(msg.subject ?: "(без темы)"),
                     from = decodeMimeWords(msg.from?.joinToString(", ") { it.toString() } ?: "(неизвестно)"),
-                    date = msg.sentDate?.toString() ?: ""
+                    date = msg.sentDate?.toString() ?: "",
+                    isSeen = isSeen
                 )
             }.reversed()
 

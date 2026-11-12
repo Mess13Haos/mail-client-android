@@ -162,12 +162,19 @@ class MailSyncRepository(context: Context) {
 
     fun dismissNotifications(context: Context, accountEmail: String, uidsToDismiss: List<Long>) {
         val db = dbHelper.writableDatabase
-        val savedValidity = dbHelper.getSavedUidValidity(db, accountEmail, "INBOX")
+        val emailKey = accountEmail.trim().lowercase()
+        val savedValidity = dbHelper.getSavedUidValidity(db, emailKey, "INBOX")
         val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
         uidsToDismiss.forEach { uid ->
-            val notificationId = MailNotificationState.notificationId(accountEmail, uid, "INBOX", savedValidity)
+            // Отменяем карточку по любому возможному ID (с текущей validity и с 0L),
+            // чтобы смена UIDVALIDITY не оставила сироту-карточку в шторке.
+            val notificationId = MailNotificationState.notificationId(emailKey, uid, "INBOX", savedValidity)
             manager.cancel(notificationId)
-            dbHelper.removeNotifiedUid(db, accountEmail, uid)
+            manager.cancel(MailNotificationState.notificationId(emailKey, uid, "INBOX", 0L))
+            dbHelper.removeNotifiedUid(db, emailKey, uid)
+            dbHelper.removePendingNotificationForUid(db, emailKey, uid)
+            CredentialStore.removeNotifiedUid(context, emailKey, uid)
+            CredentialStore.removePendingNotification(context, emailKey, uid)
         }
     }
 }

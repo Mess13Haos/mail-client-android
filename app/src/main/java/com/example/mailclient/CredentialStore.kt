@@ -13,7 +13,16 @@ object CredentialStore {
 
     private val storeLock = Any()
 
-    data class SavedAccount(val presetLabel: String, val email: String, val password: String, val lastNotifiedUid: Long = 0L)
+    data class SavedAccount(
+        val presetLabel: String,
+        val email: String,
+        val password: String,
+        val host: String = "",
+        val port: Int = 993,
+        val smtpHost: String = "",
+        val smtpPort: Int = 465,
+        val lastNotifiedUid: Long = 0L
+    )
 
     data class PendingNotification(
         val email: String,
@@ -77,6 +86,10 @@ object CredentialStore {
                         presetLabel = obj.getString("presetLabel"),
                         email = obj.getString("email"),
                         password = obj.getString("password"),
+                        host = obj.optString("host", ""),
+                        port = obj.optInt("port", 993),
+                        smtpHost = obj.optString("smtpHost", ""),
+                        smtpPort = obj.optInt("smtpPort", 465),
                         lastNotifiedUid = obj.optLong("lastNotifiedUid", 0L)
                     )
                 )
@@ -89,22 +102,44 @@ object CredentialStore {
         synchronized(storeLock) {
             val array = JSONArray()
             accounts.forEach { acc ->
-                val obj = JSONObject()
-                obj.put("presetLabel", acc.presetLabel)
-                obj.put("email", acc.email)
-                obj.put("password", acc.password)
-                obj.put("lastNotifiedUid", acc.lastNotifiedUid)
+                val obj = JSONObject().apply {
+                    put("presetLabel", acc.presetLabel)
+                    put("email", acc.email)
+                    put("password", acc.password)
+                    put("host", acc.host)
+                    put("port", acc.port)
+                    put("smtpHost", acc.smtpHost)
+                    put("smtpPort", acc.smtpPort)
+                    put("lastNotifiedUid", acc.lastNotifiedUid)
+                }
                 array.put(obj)
             }
             getPrefs(context).edit().putString(KEY_ACCOUNTS, array.toString()).apply()
         }
     }
 
-    fun addOrUpdateAccount(context: Context, presetLabel: String, email: String, password: String) {
+    fun addOrUpdateAccount(
+        context: Context,
+        presetLabel: String,
+        email: String,
+        password: String,
+        host: String = "",
+        port: Int = 993,
+        smtpHost: String = "",
+        smtpPort: Int = 465
+    ) {
         synchronized(storeLock) {
             val accounts = loadAccounts(context).toMutableList()
             val existingIndex = accounts.indexOfFirst { it.email.equals(email, ignoreCase = true) }
-            val newAccount = SavedAccount(presetLabel, email, password)
+            val newAccount = SavedAccount(
+                presetLabel = presetLabel,
+                email = email,
+                password = password,
+                host = host,
+                port = port,
+                smtpHost = smtpHost,
+                smtpPort = smtpPort
+            )
             if (existingIndex >= 0) {
                 accounts[existingIndex] = newAccount
             } else {
@@ -248,6 +283,41 @@ object CredentialStore {
                 array.put(obj)
             }
             getPrefs(context).edit().putString("pending_notifs_${email.lowercase()}", array.toString()).apply()
+        }
+    }
+
+    fun removeNotifiedUid(context: Context, email: String, uid: Long) {
+        synchronized(storeLock) {
+            val prefs = getPrefs(context)
+            val key = "notified_uids_${email.lowercase()}"
+            val json = prefs.getString(key, null) ?: return
+            try {
+                val array = JSONArray(json)
+                val filtered = JSONArray()
+                for (i in 0 until array.length()) {
+                    if (array.getLong(i) != uid) filtered.put(array.getLong(i))
+                }
+                getPrefs(context).edit().putString(key, filtered.toString()).apply()
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    fun removePendingNotification(context: Context, email: String, uid: Long) {
+        synchronized(storeLock) {
+            val prefs = getPrefs(context)
+            val key = "pending_notifs_${email.lowercase()}"
+            val json = prefs.getString(key, null) ?: return
+            try {
+                val array = JSONArray(json)
+                val filtered = JSONArray()
+                for (i in 0 until array.length()) {
+                    val obj = array.getJSONObject(i)
+                    if (obj.getLong("uid") != uid) filtered.put(obj)
+                }
+                getPrefs(context).edit().putString(key, filtered.toString()).apply()
+            } catch (_: Exception) {
+            }
         }
     }
 

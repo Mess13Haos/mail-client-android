@@ -231,6 +231,14 @@ class MailDatabaseHelper(context: Context) : SQLiteOpenHelper(context, DATABASE_
         db.delete("pending_notifications", "event_key = ?", arrayOf(eventKey))
     }
 
+    fun removePendingNotificationForUid(db: SQLiteDatabase, email: String, uid: Long) {
+        db.delete(
+            "pending_notifications",
+            "account_email = ? AND uid = ?",
+            arrayOf(email.lowercase(), uid.toString())
+        )
+    }
+
     fun getSavedUidValidity(db: SQLiteDatabase, email: String, folderName: String): Long {
         val cursor = db.query(
             "folder_state",

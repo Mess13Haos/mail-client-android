@@ -47,11 +47,21 @@ class NotificationActionReceiver : BroadcastReceiver() {
                 if (result?.isSuccess == true) {
                     NotificationHelper.dismissNotification(context, account.email, uid)
                 } else if (result?.isFailure == true) {
-                    Log.e(
-                        "NotificationActionReceiver",
-                        "Failed to process ${intent.action} for ${account.email}, UID $uid",
-                        result.exceptionOrNull()
-                    )
+                    val exception = result.exceptionOrNull()
+                    val message = exception?.message ?: ""
+                    val isNotFound = listOf("не найден", "не найдено", "not found", "message not found")
+                        .any { message.lowercase().contains(it) }
+                    if (isNotFound) {
+                        // Письма уже нет на сервере (удалено/перемещено с другого устройства),
+                        // но карточку всё равно убираем из шторки и очищаем локальное состояние.
+                        NotificationHelper.dismissNotification(context, account.email, uid)
+                    } else {
+                        Log.e(
+                            "NotificationActionReceiver",
+                            "Failed to process ${intent.action} for ${account.email}, UID $uid",
+                            exception
+                        )
+                    }
                 }
             } finally {
                 pendingResult.finish()

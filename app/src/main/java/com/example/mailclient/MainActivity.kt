@@ -74,6 +74,7 @@ import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
 import android.webkit.MimeTypeMap
+import android.util.Log
 import android.widget.Toast
 import java.io.File
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -217,7 +218,11 @@ fun AppRoot(incomingIntent: kotlinx.coroutines.flow.StateFlow<Intent?>) {
             workRequest
         )
         if (CredentialStore.loadAccounts(context).isNotEmpty()) {
-            ImapIdleService.start(context)
+            try {
+                ImapIdleService.start(context)
+            } catch (e: Exception) {
+                Log.e("MainActivity", "Cannot start idle foreground service", e)
+            }
         }
     }
     var screen by remember { mutableStateOf<Screen>(Screen.CheckingSavedLogin) }
@@ -384,8 +389,21 @@ fun AppRoot(incomingIntent: kotlinx.coroutines.flow.StateFlow<Intent?>) {
                     initialError = savedLoginError,
                     onBack = { screen = if (CredentialStore.loadAccounts(context).isEmpty()) Screen.PasswordLogin else Screen.AccountList },
                     onLoginSuccess = { preset, e, pass ->
-                        CredentialStore.addOrUpdateAccount(context, preset.label, e, pass)
-                        ImapIdleService.start(context)
+                        CredentialStore.addOrUpdateAccount(
+                            context = context,
+                            presetLabel = preset.label,
+                            email = e,
+                            password = pass,
+                            host = preset.host,
+                            port = preset.port,
+                            smtpHost = preset.smtpHost,
+                            smtpPort = preset.smtpPort
+                        )
+                        try {
+                            ImapIdleService.start(context)
+                        } catch (e: Exception) {
+                            Log.e("MainActivity", "Cannot start idle foreground service after login", e)
+                        }
                         applyAccount(preset, e, pass)
                         screen = Screen.Mailbox
                     }
@@ -1013,6 +1031,7 @@ fun MailboxScreen(
                                 }
                             }
                         ) {
+                            val isUnread = !mail.isSeen
                             ElevatedCard(
                                 modifier = Modifier
                                     .fillMaxWidth()
@@ -1020,7 +1039,14 @@ fun MailboxScreen(
                                         onClick = { onOpenMessage(mail) },
                                         onLongClick = { selectedMailForMenu = mail }
                                     ),
-                                shape = RoundedCornerShape(14.dp)
+                                shape = RoundedCornerShape(14.dp),
+                                colors = CardDefaults.elevatedCardColors(
+                                    containerColor = if (isUnread) {
+                                        MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.25f)
+                                    } else {
+                                        MaterialTheme.colorScheme.surface
+                                    }
+                                )
                             ) {
                                 Row(
                                     modifier = Modifier.fillMaxWidth().padding(12.dp),
@@ -1029,12 +1055,38 @@ fun MailboxScreen(
                                     UserAvatar(mail.from, size = 40.dp)
                                     Spacer(modifier = Modifier.width(12.dp))
                                     Column(modifier = Modifier.weight(1f)) {
-                                        Text(mail.from, fontWeight = FontWeight.Bold, maxLines = 1)
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Text(
+                                                text = mail.from,
+                                                fontWeight = if (isUnread) FontWeight.Bold else FontWeight.Medium,
+                                                color = if (isUnread) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f),
+                                                maxLines = 1,
+                                                modifier = Modifier.weight(1f)
+                                            )
+                                            if (isUnread) {
+                                                Spacer(modifier = Modifier.width(8.dp))
+                                                Box(
+                                                    modifier = Modifier
+                                                        .size(8.dp)
+                                                        .background(MaterialTheme.colorScheme.primary, CircleShape)
+                                                )
+                                            }
+                                        }
                                         Spacer(modifier = Modifier.height(2.dp))
-                                        Text(mail.subject, maxLines = 2, style = MaterialTheme.typography.bodyMedium)
+                                        Text(
+                                            text = mail.subject,
+                                            maxLines = 2,
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            fontWeight = if (isUnread) FontWeight.Bold else FontWeight.Normal,
+                                            color = if (isUnread) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
                                         Spacer(modifier = Modifier.height(4.dp))
                                         Text(
-                                            mail.date,
+                                            text = mail.date,
                                             style = MaterialTheme.typography.bodySmall,
                                             color = MaterialTheme.colorScheme.onSurfaceVariant
                                         )
